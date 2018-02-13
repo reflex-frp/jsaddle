@@ -15,6 +15,7 @@
 {-# LANGUAGE ConstraintKinds            #-}
 {-# LANGUAGE KindSignatures             #-}
 {-# LANGUAGE AllowAmbiguousTypes        #-}
+{-# OPTIONS_GHC -Wno-deprecated      #-}
 -----------------------------------------------------------------------------
 --
 -- Module      :  Language.Javascript.JSaddle.Types
@@ -146,9 +147,6 @@ data JSContextRef = JSContextRef {
   , addCallback            :: Object -> JSCallAsFunction -> IO ()
   , nextRef                :: TVar JSValueRef
   , doEnableLogging        :: Bool -> IO ()
-  , finalizerThreads       :: MVar (Set Text)
-  , animationFrameHandlers :: MVar [Double -> JSM ()]
-  , liveRefs               :: MVar (Set Int64)
 }
 #endif
 
@@ -410,8 +408,7 @@ newtype JSStringForSend = JSStringForSend Text deriving(Show, ToJSON, FromJSON, 
 instance NFData JSStringForSend
 
 -- | Command sent to a JavaScript context for execution asynchronously
-data AsyncCommand = FreeRef Text JSValueForSend
-                  | FreeRefs Text
+data AsyncCommand = FreeRef JSValueRef
                   | SetPropertyByName JSObjectForSend JSStringForSend JSValueForSend
                   | SetPropertyAtIndex JSObjectForSend Int JSValueForSend
                   | StringToValue JSStringForSend JSValueForSend
@@ -428,7 +425,6 @@ data AsyncCommand = FreeRef Text JSValueForSend
                   | NewArray [JSValueForSend] JSValueForSend
                   | EvaluateScript JSStringForSend JSValueForSend
                   | SyncWithAnimationFrame JSValueForSend
-                  | StartSyncBlock
                   | EndSyncBlock
                    deriving (Show, Generic)
 
@@ -493,8 +489,8 @@ instance ToJSON Result where
 
 instance FromJSON Result
 
-data BatchResults = Success [JSValueReceived] [Result]
-                  | Failure [JSValueReceived] [Result] JSValueReceived
+data BatchResults = Success [Result]
+                  | Failure [Result] JSValueReceived
              deriving (Show, Generic)
 
 instance ToJSON BatchResults where
