@@ -12,7 +12,8 @@
 --
 -----------------------------------------------------------------------------
 
-module Language.Javascript.JSaddle.Null (
+module Language.Javascript.JSaddle.Null where {-
+(
     run
 ) where
 
@@ -54,3 +55,4 @@ run f = do
                                 PropertyNames _ -> PropertyNamesResult []
                                 Sync -> SyncResult) commands
     start
+-}

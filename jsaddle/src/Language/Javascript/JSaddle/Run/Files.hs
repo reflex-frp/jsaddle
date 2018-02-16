@@ -37,17 +37,8 @@ indexHtml =
 initState :: ByteString
 initState = "\
     \        var jsaddle_values = new Map();\n\
-    \        var jsaddle_free = new Map();\n\
-    \        jsaddle_values.set(0, null);\n\
-    \        jsaddle_values.set(1, undefined);\n\
-    \        jsaddle_values.set(2, false);\n\
-    \        jsaddle_values.set(3, true);\n\
-    \        jsaddle_values.set(4, window);\n\
-    \        var jsaddle_index = 100;\n\
-    \        var expectedBatch = 1;\n\
-    \        var lastResults = [0, {}];\n\
-    \        var inCallback = 0;\n\
-    \        var asyncBatch = null;\n\
+    \        jsaddle_values.set(0, undefined);\n\
+    \        jsaddle_nextValId = -1;\n\
     \"
 
 runBatch :: (ByteString -> ByteString) -> Maybe (ByteString -> ByteString) -> ByteString

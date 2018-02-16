@@ -21,11 +21,11 @@ module Language.Javascript.JSaddle.WebSockets (
   , jsaddleWithAppOr
   , jsaddleAppPartial
   , jsaddleJs
-  , debug
-  , debugWrapper
+--  , debug
+--  , debugWrapper
 ) where
 
-import Control.Monad (when, void, forever)
+import Control.Monad (when, void, forever, join)
 import Control.Concurrent (killThread, forkIO, threadDelay)
 import Control.Exception (handle, AsyncException, throwIO, fromException, finally)
 
@@ -47,14 +47,14 @@ import qualified Network.Wai as W
 import qualified Data.Text as T (pack)
 import qualified Network.HTTP.Types as H
        (status403, status200)
-import Language.Javascript.JSaddle.Run (syncPoint, runJavaScript)
+import Language.Javascript.JSaddle.Run (syncPoint, runJS)
 import Language.Javascript.JSaddle.Run.Files (indexHtml, runBatch, ghcjsHelpers, initState)
 import Language.Javascript.JSaddle.Debug
        (removeContext, addContext)
 import Data.Maybe (fromMaybe)
 import qualified Data.Map as M (empty, insert, lookup)
 import Data.IORef
-       (readIORef, newIORef, atomicModifyIORef')
+       (readIORef, newIORef, atomicModifyIORef', writeIORef)
 import Data.ByteString.Lazy (ByteString)
 import Control.Concurrent.MVar
        (tryTakeMVar, MVar, tryPutMVar, modifyMVar_, putMVar, takeMVar,
@@ -62,20 +62,25 @@ import Control.Concurrent.MVar
 import Network.Wai.Handler.Warp
        (defaultSettings, setTimeout, setPort, runSettings)
 import Foreign.Store (newStore, readStore, lookupStore)
-import Language.Javascript.JSaddle (askJSM)
+import Language.Javascript.JSaddle (askJSM, Rsp, SyncCallbackId, ValId)
 import Control.Monad.IO.Class (MonadIO(..))
+import Control.Monad.Trans.Reader
 
 jsaddleOr :: ConnectionOptions -> JSM () -> Application -> IO Application
 jsaddleOr opts entryPoint otherApp = do
-    syncHandlers <- newIORef M.empty
+    processSyncResultRef <- newIORef $ error "processSyncResult not yet set up"
+    let processSyncResult callback this args = do
+          f <- readIORef processSyncResultRef
+          f callback this args
+    continueSyncCallbackRef <- newIORef $ error "continueSyncCallback not yet set up"
+    let continueSyncCallback = do
+          join $ readIORef continueSyncCallbackRef
     let wsApp :: ServerApp
         wsApp pending_conn = do
             conn <- acceptRequest pending_conn
-            rec (processResult, processSyncResult, start) <- runJavaScript (sendTextData conn . encode) $ do
-                    syncKey <- T.pack . show . contextId <$> askJSM
-                    liftIO $ atomicModifyIORef' syncHandlers (\m -> (M.insert syncKey processSyncResult m, ()))
-                    liftIO $ sendTextData conn (encode syncKey)
-                    entryPoint
+            (processResult, processSyncResult', continueSyncCallback', env) <- runJS (sendTextData conn . encode)
+            writeIORef processSyncResultRef processSyncResult'
+            writeIORef continueSyncCallbackRef continueSyncCallback'
             _ <- forkIO . forever $
                 receiveDataMessage conn >>= \case
                     (WS.Text t) ->
@@ -83,7 +88,7 @@ jsaddleOr opts entryPoint otherApp = do
                             Nothing -> error $ "jsaddle Results decode failed : " <> show t
                             Just r  -> processResult r
                     _ -> error "jsaddle WebSocket unexpected binary data"
-            start
+            runReaderT (unJSM entryPoint) env
             waitTillClosed conn
 
         -- Based on Network.WebSocket.forkPingThread
@@ -101,16 +106,15 @@ jsaddleOr opts entryPoint otherApp = do
 
         syncHandler :: Application
         syncHandler req sendResponse = case (W.requestMethod req, W.pathInfo req) of
-            ("POST", ["sync", syncKey]) -> do
+            ("POST", ["sync"]) -> do
                 body <- lazyRequestBody req
-                case decode body of
+                case decode body :: Maybe (Maybe (SyncCallbackId, ValId, [ValId])) of
                     Nothing -> error $ "jsaddle sync message decode failed : " <> show body
-                    Just result ->
-                        M.lookup syncKey <$> readIORef syncHandlers >>= \case
-                            Nothing -> error "jsaddle missing sync message handler"
-                            Just handler -> do
-                                next <- encode <$> handler result
-                                sendResponse $ W.responseLBS H.status200 [("Content-Type", "application/json")] next
+                    Just parsed -> do
+                      result <- case parsed of
+                        Just (callback, this, args) -> processSyncResult callback this args
+                        Nothing -> continueSyncCallback
+                      sendResponse $ W.responseLBS H.status200 [("Content-Type", "application/json")] $ encode result
             _ -> otherApp req sendResponse
     return $ websocketsOr opts wsApp syncHandler
 
@@ -138,6 +142,101 @@ jsaddleAppPartialWithJs js req sendResponse = case (W.requestMethod req, W.pathI
     ("GET", ["jsaddle.js"]) -> Just $ sendResponse $ W.responseLBS H.status200 [("Content-Type", "application/javascript")] js
     _ -> Nothing
 
+jsaddleCore :: ByteString
+jsaddleCore = "\n\
+  \function jsaddle(sendRsp, runSyncCallback) {\n\
+  \  var vals = new Map();\n\
+  \  var nextValId = -1;\n\
+  \  var unwrapVal = function(valId) {\n\
+  \    if(typeof val === 'object') {\n\
+  \      if(val.length === 0) {\n\
+  \        return undefined;\n\
+  \      } else {\n\
+  \        return vals.get(valId[0]);\n\
+  \      }\n\
+  \    } else {\n\
+  \      return valId;\n\
+  \    }\n\
+  \  };\n\
+  \  var wrapVal = function(val) {\n\
+  \    switch(typeof val) {\n\
+  \    case 'undefined':\n\
+  \      return [];\n\
+  \    case 'boolean':\n\
+  \    case 'number':\n\
+  \    case 'string':\n\
+  \      return val;\n\
+  \    case 'object':\n\
+  \      if(val === null) {\n\
+  \        return null;\n\
+  \      }\n\
+  \      // Fall through\n\
+  \    default:\n\
+  \      var valId = nextValId--;\n\
+  \      vals.set(valId, val);\n\
+  \      return [valId];\n\
+  \    }\n\
+  \  };\n\
+  \  var result(ref, val) {\n\
+  \    jsaddle_values.set(ref, val);\n\
+  \    sendRsp({\n\
+  \      'tag': 'Result',\n\
+  \      'contents': [\n\
+  \        ref,\n\
+  \        wrapVal(val)\n\
+  \      ]\n\
+  \    });\n\
+  \  };\n\
+  \  return {\n\
+  \    processReq: function(req) {\n\
+  \      switch(req.tag) {\n\
+  \      case 'Eval':\n\
+  \        result(req.contents[1], eval(req.contents[0]));\n\
+  \        break;\n\
+  \      case 'FreeRef':\n\
+  \        jsaddle_values.delete(req.contents[0]);\n\
+  \        break;\n\
+  \      case 'NewJson':\n\
+  \        result(req.contents[1], req.contents[0]);\n\
+  \        break;\n\
+  \      case 'GetJson':\n\
+  \        sendRsp({\n\
+  \          'tag': 'GetJson',\n\
+  \          'contents': [\n\
+  \            jsaddle_values.get(req)\n\
+  \          ]\n\
+  \        });\n\
+  \        break;\n\
+  \      case 'SyncBlock':\n\
+  \        runSyncCallback(req.contents[0], 0, []);\n\
+  \        break;\n\
+  \      case 'NewSyncCallback':\n\
+  \        var callbackId = req.contents[0];\n\
+  \        result(req.contents[1], function() {\n\
+  \          runSyncCallback(callbackId, wrapVal(this), Array.prototype.slice.call(arguments).map(wrapVal));\n\
+  \        });\n\
+  \        break;\n\
+  \      case 'NewAsyncCallback':\n\
+  \        var callbackId = req.contents[0];\n\
+  \        result(req.contents[1], function() {\n\
+  \          sendRsp({\n\
+  \            'tag': 'CallAsync',\n\
+  \            'contents': [\n\
+  \              callbackId,\n\
+  \              wrapVal(this),\n\
+  \              Array.prototype.slice.call(arguments).map(wrapVal)\n\
+  \            ]\n\
+  \          });\n\
+  \        });\n\
+  \        break;\n\
+  \      default:\n\
+  \        throw 'processReq: unknown request tag ' + JSON.stringify(req.tag);\n\
+  \      }\n\
+  \    }\n\
+  \  };\n\
+  \}"
+
+
 -- Use this to generate this string for embedding
 -- sed -e 's|\\|\\\\|g' -e 's|^|    \\|' -e 's|$|\\n\\|' -e 's|"|\\"|g' data/jsaddle.js | pbcopy
 jsaddleJs :: Bool -> ByteString
@@ -154,7 +253,6 @@ jsaddleJs refreshOnLoad = "\
     \    var syncKey = \"\";\n\
     \\n\
     \    ws.onopen = function(e) {\n\
-    \ " <> initState <> "\n\
     \\n\
     \        ws.onmessage = function(e) {\n\
     \            var batch = JSON.parse(e.data);\n\
@@ -164,15 +262,6 @@ jsaddleJs refreshOnLoad = "\
     \            }\n\
     \            if(typeof batch === \"string\") {\n\
     \                syncKey = batch;\n" <>
-    (if refreshOnLoad
-     then "                var xhr = new XMLHttpRequest();\n\
-          \                xhr.open('POST', '/reload/'+syncKey, true);\n\
-          \                xhr.onreadystatechange = function() {\n\
-          \                    if(xhr.readyState === XMLHttpRequest.DONE && xhr.status === 200)\n\
-          \                        setTimeout(function(){window.location.reload();}, 100);\n\
-          \                };\n\
-          \                xhr.send();\n"
-     else "") <>
     "                return;\n\
     \            }\n\
     \\n\
@@ -194,6 +283,7 @@ jsaddleJs refreshOnLoad = "\
     \connect();\n\
     \"
 
+{-
 -- | Start or restart the server.
 -- To run this as part of every :reload use
 -- > :def! reload (const $ return "::reload\nLanguage.Javascript.JSaddle.Warp.debug 3708 SomeMainModule.someMainFunction")
@@ -203,12 +293,14 @@ debug port f = do
         runSettings (setPort port (setTimeout 3600 defaultSettings)) =<<
             jsaddleOr defaultConnectionOptions (registerContext >> f >> syncPoint) (withRefresh $ jsaddleAppWithJs $ jsaddleJs True)
     putStrLn $ "<a href=\"http://localhost:" <> show port <> "\">run</a>"
+-}
 
 refreshMiddleware :: ((Response -> IO ResponseReceived) -> IO ResponseReceived) -> Middleware
 refreshMiddleware refresh otherApp req sendResponse = case (W.requestMethod req, W.pathInfo req) of
     ("POST", ["reload", _syncKey]) -> refresh sendResponse
     _ -> otherApp req sendResponse
 
+{-
 debugWrapper :: (Middleware -> JSM () -> IO ()) -> IO ()
 debugWrapper run = do
     reloadMVar <- newEmptyMVar
@@ -262,3 +354,4 @@ debugWrapper run = do
             void $ tryTakeMVar restartMVar
             putMVar restartMVar start
   where shutdown_0 = 0
+-}

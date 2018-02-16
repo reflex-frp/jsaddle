@@ -18,20 +18,15 @@
 module Language.Javascript.JSaddle.Monad (
   -- * Types
     JSM(..)
-  , JSContextRef
   , MonadJSM
   , liftJSM
-
-  -- * Running JavaScript in a JavaScript context
   , askJSM
   , runJSM
-  , runJSaddle
-
-  -- * Syncronizing with the JavaScript context
   , syncPoint
   , syncAfter
   , waitForAnimationFrame
   , nextAnimationFrame
+  , animationFrameHandlers
 
   -- * Exception Handling
   , catch
@@ -43,25 +38,20 @@ import Control.Monad.Trans.Reader (runReaderT, ask)
 #endif
 import Control.Monad.IO.Class (MonadIO(..))
 import Control.Monad.Catch (catch, bracket)
-import Language.Javascript.JSaddle.Types (JSM(..), MonadJSM, liftJSM, JSContextRef)
-import Language.Javascript.JSaddle.Run (syncPoint, syncAfter, waitForAnimationFrame, nextAnimationFrame)
+import Language.Javascript.JSaddle.Types (JSM(..), MonadJSM, liftJSM, askJSM, JSContextRef, runJSM)
+import Control.Concurrent.MVar (MVar)
 
--- | Gets the JavaScript context from the monad
-askJSM :: MonadJSM m => m JSContextRef
-#ifdef ghcjs_HOST_OS
-askJSM = return ()
-#else
-askJSM = liftJSM $ JSM ask
-#endif
+syncPoint :: Applicative m => m ()
+syncPoint = pure ()
 
--- | Runs a 'JSM' JavaScript function in a given JavaScript context.
-runJSM :: MonadIO m => JSM a -> JSContextRef -> m a
-#ifdef ghcjs_HOST_OS
-runJSM f = liftIO . const f
-#else
-runJSM f = liftIO . runReaderT (unJSM f)
-#endif
+syncAfter :: Applicative m => m ()
+syncAfter = pure ()
 
--- | Alternative version of 'runJSM'
-runJSaddle :: MonadIO m => JSContextRef -> JSM a -> m a
-runJSaddle = flip runJSM
+waitForAnimationFrame :: m () -> m ()
+waitForAnimationFrame = id
+
+nextAnimationFrame :: m () -> m ()
+nextAnimationFrame = id
+
+animationFrameHandlers :: JSContextRef -> MVar [Double -> JSM ()]
+animationFrameHandlers = undefined

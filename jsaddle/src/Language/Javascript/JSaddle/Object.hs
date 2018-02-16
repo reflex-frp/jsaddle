@@ -117,15 +117,15 @@ import Language.Javascript.JSaddle.Types
 import GHCJS.Marshal.Internal (ToJSVal(..))
 import Language.Javascript.JSaddle.Native
        (newAsyncCallback, newSyncCallback, callAsFunction, callAsConstructor)
-import Language.Javascript.JSaddle.Monad (askJSM, JSM)
+import Language.Javascript.JSaddle.Monad (JSM)
 import Language.Javascript.JSaddle.Types
-       (JSValueForSend(..), AsyncCommand(..), JSString, Object(..),
-        SomeJSArray(..), JSVal(..), JSCallAsFunction, JSContextRef(..))
+       (JSString, Object(..), SyncCallbackId,
+        SomeJSArray(..), JSVal(..), JSCallAsFunction)
 import JavaScript.Object.Internal (create, listProps)
-import Language.Javascript.JSaddle.Run (sendAsyncCommand)
+import Language.Javascript.JSaddle.Run
 #endif
 import JavaScript.Array.Internal (fromListIO)
-import Language.Javascript.JSaddle.Value (valToObject)
+import Language.Javascript.JSaddle.Value (valToObject, jsNull)
 import Language.Javascript.JSaddle.Classes (MakeObject(..))
 import Language.Javascript.JSaddle.Marshal.String (ToJSString(..))
 import Language.Javascript.JSaddle.Arguments (MakeArgs(..))
@@ -435,7 +435,7 @@ fun = id
 #ifdef ghcjs_HOST_OS
 data Function = Function {functionCallback :: Callback (JSVal -> JSVal -> IO ()), functionObject :: Object}
 #else
-newtype Function = Function {functionObject :: Object}
+data Function = Function {functionCallback :: SyncCallbackId, functionObject :: Object}
 #endif
 
 
@@ -458,8 +458,9 @@ function f = do
     Function callback <$> makeFunctionWithCallback callback
 #else
 function f = do
-    object <- newSyncCallback f
-    return $ Function object
+    cb <- newSyncCallback f
+    f' <- callbackToSyncFunction cb --TODO: "ContinueAsync" behavior
+    return $ Function cb $ Object f'
 #endif
 
 -- ^ Make a JavaScript function object that wraps a Haskell function.
@@ -475,8 +476,9 @@ asyncFunction f = do
     Function callback <$> makeFunctionWithCallback callback
 #else
 asyncFunction f = do
-    object <- newAsyncCallback f
-    return $ Function object
+    cb <- newAsyncCallback f
+    f' <- callbackToAsyncFunction cb
+    return $ Function cb $ Object f'
 #endif
 
 freeFunction :: Function -> JSM ()
@@ -484,16 +486,8 @@ freeFunction :: Function -> JSM ()
 freeFunction (Function callback _) = liftIO $
     releaseCallback callback
 #else
-freeFunction (Function (Object (JSVal objectRef))) = do
-    -- By now the callback should ideally have been removed from whatever
-    -- events it was added to.
-    -- In case a call to the callback is still pending (perhaps just being sent
-    -- on the JS side) we use FreeCallback to queue the callback to be freed when
-    -- the next batch of results comes back fro JS.
-    -- We are not using withJSVal to keep JS value "alive" because FreeCallback
-    -- does not use the it.
-    n <- liftIO $ readIORef objectRef
-    sendAsyncCommand (FreeCallback (JSValueForSend n))
+freeFunction (Function syncCallbackId _) = do
+  freeSyncCallback syncCallbackId
 #endif
 
 instance ToJSVal Function where
@@ -532,7 +526,7 @@ global = js_window
 foreign import javascript unsafe "$r = window"
     js_window :: Object
 #else
-global = Object . JSVal . unsafePerformIO $ newIORef 4
+global = undefined
 #endif
 
 -- | Get a list containing the property names present on a given object
@@ -613,5 +607,5 @@ nullObject :: Object
 #ifdef ghcjs_HOST_OS
 nullObject = Object nullRef
 #else
-nullObject = Object . JSVal . unsafePerformIO $ newIORef 0
+nullObject = Object jsNull
 #endif
