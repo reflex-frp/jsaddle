@@ -119,7 +119,7 @@ import Language.Javascript.JSaddle.Native
        (newAsyncCallback, newSyncCallback, callAsFunction, callAsConstructor)
 import Language.Javascript.JSaddle.Monad (JSM)
 import Language.Javascript.JSaddle.Types
-       (JSString, Object(..), SyncCallbackId,
+       (JSString, Object(..), SyncCallbackId, PrimVal(..),
         SomeJSArray(..), JSVal(..), JSCallAsFunction)
 import JavaScript.Object.Internal (create, listProps)
 import Language.Javascript.JSaddle.Run
@@ -134,6 +134,7 @@ import Language.Javascript.JSaddle.Properties
 import Control.Lens (IndexPreservingGetter, to)
 import Data.IORef (newIORef, readIORef)
 import System.IO.Unsafe (unsafePerformIO)
+import GHCJS.Prim.Internal (primToJSVal)
 
 -- $setup
 -- >>> import Control.Concurrent.MVar (newEmptyMVar, takeMVar, putMVar)
@@ -458,8 +459,7 @@ function f = do
     Function callback <$> makeFunctionWithCallback callback
 #else
 function f = do
-    cb <- newSyncCallback f
-    f' <- callbackToSyncFunction cb --TODO: "ContinueAsync" behavior
+    (cb, f') <- newSyncCallback f --TODO: "ContinueAsync" behavior
     return $ Function cb $ Object f'
 #endif
 
@@ -476,8 +476,7 @@ asyncFunction f = do
     Function callback <$> makeFunctionWithCallback callback
 #else
 asyncFunction f = do
-    cb <- newAsyncCallback f
-    f' <- callbackToAsyncFunction cb
+    (cb, f') <- newAsyncCallback f
     return $ Function cb $ Object f'
 #endif
 
@@ -526,7 +525,7 @@ global = js_window
 foreign import javascript unsafe "$r = window"
     js_window :: Object
 #else
-global = undefined
+global = Object $ primToJSVal $ PrimVal_Ref globalRef
 #endif
 
 -- | Get a list containing the property names present on a given object

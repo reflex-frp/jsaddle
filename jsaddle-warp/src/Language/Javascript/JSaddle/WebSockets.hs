@@ -143,104 +143,130 @@ jsaddleAppPartialWithJs js req sendResponse = case (W.requestMethod req, W.pathI
     _ -> Nothing
 
 jsaddleCore :: ByteString
-jsaddleCore = "\n\
-  \function jsaddle(sendRsp, runSyncCallback) {\n\
-  \  var vals = new Map();\n\
-  \  var nextValId = -1;\n\
-  \  var unwrapVal = function(valId) {\n\
-  \    if(typeof val === 'object') {\n\
-  \      if(val.length === 0) {\n\
-  \        return undefined;\n\
-  \      } else {\n\
-  \        return vals.get(valId[0]);\n\
-  \      }\n\
-  \    } else {\n\
-  \      return valId;\n\
-  \    }\n\
-  \  };\n\
-  \  var wrapVal = function(val) {\n\
-  \    switch(typeof val) {\n\
-  \    case 'undefined':\n\
-  \      return [];\n\
-  \    case 'boolean':\n\
-  \    case 'number':\n\
-  \    case 'string':\n\
-  \      return val;\n\
-  \    case 'object':\n\
-  \      if(val === null) {\n\
-  \        return null;\n\
-  \      }\n\
-  \      // Fall through\n\
-  \    default:\n\
-  \      var valId = nextValId--;\n\
-  \      vals.set(valId, val);\n\
-  \      return [valId];\n\
-  \    }\n\
-  \  };\n\
-  \  var result(ref, val) {\n\
-  \    jsaddle_values.set(ref, val);\n\
-  \    sendRsp({\n\
-  \      'tag': 'Result',\n\
-  \      'contents': [\n\
-  \        ref,\n\
-  \        wrapVal(val)\n\
-  \      ]\n\
-  \    });\n\
-  \  };\n\
-  \  return {\n\
-  \    processReq: function(req) {\n\
-  \      switch(req.tag) {\n\
-  \      case 'Eval':\n\
-  \        result(req.contents[1], eval(req.contents[0]));\n\
-  \        break;\n\
-  \      case 'FreeRef':\n\
-  \        jsaddle_values.delete(req.contents[0]);\n\
-  \        break;\n\
-  \      case 'NewJson':\n\
-  \        result(req.contents[1], req.contents[0]);\n\
-  \        break;\n\
-  \      case 'GetJson':\n\
-  \        sendRsp({\n\
-  \          'tag': 'GetJson',\n\
-  \          'contents': [\n\
-  \            jsaddle_values.get(req)\n\
-  \          ]\n\
-  \        });\n\
-  \        break;\n\
-  \      case 'SyncBlock':\n\
-  \        runSyncCallback(req.contents[0], 0, []);\n\
-  \        break;\n\
-  \      case 'NewSyncCallback':\n\
-  \        var callbackId = req.contents[0];\n\
-  \        result(req.contents[1], function() {\n\
-  \          runSyncCallback(callbackId, wrapVal(this), Array.prototype.slice.call(arguments).map(wrapVal));\n\
-  \        });\n\
-  \        break;\n\
-  \      case 'NewAsyncCallback':\n\
-  \        var callbackId = req.contents[0];\n\
-  \        result(req.contents[1], function() {\n\
-  \          sendRsp({\n\
-  \            'tag': 'CallAsync',\n\
-  \            'contents': [\n\
-  \              callbackId,\n\
-  \              wrapVal(this),\n\
-  \              Array.prototype.slice.call(arguments).map(wrapVal)\n\
-  \            ]\n\
-  \          });\n\
-  \        });\n\
-  \        break;\n\
-  \      default:\n\
-  \        throw 'processReq: unknown request tag ' + JSON.stringify(req.tag);\n\
-  \      }\n\
-  \    }\n\
-  \  };\n\
-  \}"
+jsaddleCore = "\
+    \function jsaddle(global, sendRsp, startSyncCallback, continueSyncCallback) {\n\
+    \  var vals = new Map();\n\
+    \  vals.set(1, global);\n\
+    \  var nextValId = -1;\n\
+    \  var unwrapVal = function(valId) {\n\
+    \    if(typeof valId === 'object') {\n\
+    \      if(valId.length === 0) {\n\
+    \        return undefined;\n\
+    \      } else {\n\
+    \        return vals.get(valId[0]);\n\
+    \      }\n\
+    \    } else {\n\
+    \      return valId;\n\
+    \    }\n\
+    \  };\n\
+    \  var wrapVal = function(val, def) {\n\
+    \    switch(typeof val) {\n\
+    \    case 'undefined':\n\
+    \      return [];\n\
+    \    case 'boolean':\n\
+    \    case 'number':\n\
+    \    case 'string':\n\
+    \      return val;\n\
+    \    case 'object':\n\
+    \      if(val === null) {\n\
+    \        return null;\n\
+    \      }\n\
+    \      // Fall through\n\
+    \    default:\n\
+    \      if(def) {\n\
+    \        return def;\n\
+    \      }\n\
+    \      var valId = nextValId--;\n\
+    \      vals.set(valId, val);\n\
+    \      return [valId];\n\
+    \    }\n\
+    \  };\n\
+    \  var result = function(ref, val) {\n\
+    \    vals.set(ref, val);\n\
+    \    sendRsp({\n\
+    \      'tag': 'Result',\n\
+    \      'contents': [\n\
+    \        ref,\n\
+    \        wrapVal(val, [])\n\
+    \      ]\n\
+    \    });\n\
+    \  };\n\
+    \  var runSyncCallback = function(callback, that, args) {\n\
+    \    var rsp = startSyncCallback(callback, that, args)\n\
+    \    while(rsp.Right) {\n\
+    \      processReq(rsp.Right);\n\
+    \      rsp = continueSyncCallback();\n\
+    \    }\n\
+    \    return rsp.Left;\n\
+    \  };\n\
+    \  var processReq = function(req) {\n\
+    \    switch(req.tag) {\n\
+    \    case 'Eval':\n\
+    \      result(req.contents[1], eval(req.contents[0]));\n\
+    \      break;\n\
+    \    case 'FreeRef':\n\
+    \      vals.delete(req.contents[0]);\n\
+    \      break;\n\
+    \    case 'NewJson':\n\
+    \      result(req.contents[1], req.contents[0]);\n\
+    \      break;\n\
+    \    case 'GetJson':\n\
+    \      sendRsp({\n\
+    \        'tag': 'GetJson',\n\
+    \        'contents': [\n\
+    \          unwrapVal(req)\n\
+    \        ]\n\
+    \      });\n\
+    \      break;\n\
+    \    case 'SyncBlock':\n\
+    \      //TODO: Continuation\n\
+    \      runSyncCallback(req.contents[0], [], []);\n\
+    \      break;\n\
+    \    case 'NewSyncCallback':\n\
+    \      result(req.contents[1], function() {\n\
+    \        return runSyncCallback(req.contents[0], wrapVal(this), Array.prototype.slice.call(arguments).map(wrapVal));\n\
+    \      });\n\
+    \      break;\n\
+    \    case 'NewAsyncCallback':\n\
+    \      var callbackId = req.contents[0];\n\
+    \      result(req.contents[1], function() {\n\
+    \        sendRsp({\n\
+    \          'tag': 'CallAsync',\n\
+    \          'contents': [\n\
+    \            callbackId,\n\
+    \            wrapVal(this),\n\
+    \            Array.prototype.slice.call(arguments).map(wrapVal)\n\
+    \          ]\n\
+    \        });\n\
+    \      });\n\
+    \      break;\n\
+    \    case 'SetProperty':\n\
+    \      unwrapVal(req.contents[2])[unwrapVal(req.contents[0])] = unwrapVal(req.contents[1]);\n\
+    \      break;\n\
+    \    case 'GetProperty':\n\
+    \      result(req.contents[2], unwrapVal(req.contents[1])[unwrapVal(req.contents[0])]);\n\
+    \      break;\n\
+    \    case 'CallAsFunction':\n\
+    \      result(req.contents[3], unwrapVal(req.contents[0]).apply(unwrapVal(req.contents[1]), req.contents[2].map(unwrapVal)));\n\
+    \      break;\n\
+    \    case 'CallAsConstructor':\n\
+    \      result(req.contents[2], new (Function.prototype.bind.apply(unwrapVal(req.contents[0]), req.contents[1].map(unwrapVal))));\n\
+    \      break;\n\
+    \    default:\n\
+    \      throw 'processReq: unknown request tag ' + JSON.stringify(req.tag);\n\
+    \    }\n\
+    \  };\n\
+    \  return {\n\
+    \    processReq: processReq\n\
+    \  };\n\
+    \}\n\
+    \"
 
 
 -- Use this to generate this string for embedding
 -- sed -e 's|\\|\\\\|g' -e 's|^|    \\|' -e 's|$|\\n\\|' -e 's|"|\\"|g' data/jsaddle.js | pbcopy
 jsaddleJs :: Bool -> ByteString
-jsaddleJs refreshOnLoad = "\
+jsaddleJs refreshOnLoad = jsaddleCore <> "\
     \if(typeof global !== \"undefined\") {\n\
     \    global.window = global;\n\
     \    global.WebSocket = require('ws');\n\
@@ -250,29 +276,27 @@ jsaddleJs refreshOnLoad = "\
     \    var wsaddress = window.location.protocol.replace('http', 'ws')+\"//\"+window.location.hostname+(window.location.port?(\":\"+window.location.port):\"\");\n\
     \\n\
     \    var ws = new WebSocket(wsaddress);\n\
+    \    var sync = function(v) {\n\
+    \      var xhr = new XMLHttpRequest();\n\
+    \      xhr.open('POST', '/sync', false);\n\
+    \      xhr.setRequestHeader(\"Content-type\", \"application/json\");\n\
+    \      xhr.send(JSON.stringify(v));\n\
+    \      return JSON.parse(xhr.response);\n\
+    \    };\n\
+    \    var core = jsaddle(window, function(a) {\n\
+    \      ws.send(JSON.stringify(a));\n\
+    \    }, function(callback, that, args) {\n\
+    \      return sync([callback, that, args]);\n\
+    \    }, function() {\n\
+    \      return sync(null);\n\
+    \    });\n\
     \    var syncKey = \"\";\n\
     \\n\
     \    ws.onopen = function(e) {\n\
     \\n\
     \        ws.onmessage = function(e) {\n\
-    \            var batch = JSON.parse(e.data);\n\
-    \            if(inCallback > 0) {\n\
-    \                asyncBatch = batch;\n\
-    \                return;\n\
-    \            }\n\
-    \            if(typeof batch === \"string\") {\n\
-    \                syncKey = batch;\n" <>
-    "                return;\n\
-    \            }\n\
-    \\n\
-    \ " <> runBatch (\a -> "ws.send(JSON.stringify(" <> a <> "));")
-              (Just (\a -> "(function(){\n\
-                  \                       var xhr = new XMLHttpRequest();\n\
-                  \                       xhr.open('POST', '/sync/'+syncKey, false);\n\
-                  \                       xhr.setRequestHeader(\"Content-type\", \"application/json\");\n\
-                  \                       xhr.send(JSON.stringify(" <> a <> "));\n\
-                  \                       return JSON.parse(xhr.response);})()")) <> "\
-    \        };\n\
+    \          core.processReq(JSON.parse(e.data));\n\
+    \        }\n\
     \    };\n\
     \    ws.onerror = function() {\n\
     \        setTimeout(connect, 1000);\n\

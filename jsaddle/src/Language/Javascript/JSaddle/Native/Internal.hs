@@ -46,6 +46,8 @@ import Control.Monad.IO.Class (MonadIO(..))
 
 import Data.Aeson (Value)
 import qualified Data.Aeson as A
+import Data.Text.Encoding (decodeUtf8)
+import qualified Data.ByteString.Lazy as LBS
 
 import GHCJS.Prim.Internal
 import Language.Javascript.JSaddle.Types
@@ -55,12 +57,13 @@ import GHC.STRef (STRef(..))
 import GHC.IO (IO(..))
 import GHC.Base (touch#)
 
+--TODO: Make JSString a JSVal under the hood
 setPropertyByName :: JSString -> JSVal -> Object -> JSM ()
-setPropertyByName name val this = undefined
+setPropertyByName (JSString name) val (Object this) = setProperty (primToJSVal $ PrimVal_String name) val this
 {-# INLINE setPropertyByName #-}
 
 setPropertyAtIndex :: Int -> JSVal -> Object -> JSM ()
-setPropertyAtIndex index val this = undefined
+setPropertyAtIndex index val (Object this) = setProperty (primToJSVal $ PrimVal_Number $ fromIntegral index) val this
 {-# INLINE setPropertyAtIndex #-}
 
 stringToValue :: JSString -> JSM JSVal
@@ -72,39 +75,41 @@ numberToValue = return . primToJSVal . PrimVal_Number
 {-# INLINE numberToValue #-}
 
 jsonValueToValue :: Value -> JSM JSVal
-jsonValueToValue = undefined
+jsonValueToValue = newJson
 {-# INLINE jsonValueToValue #-}
 
 getPropertyByName :: JSString -> Object -> JSM JSVal
-getPropertyByName name this = undefined
+getPropertyByName (JSString name) (Object this) = getProperty (primToJSVal $ PrimVal_String name) this
 {-# INLINE getPropertyByName #-}
 
 getPropertyAtIndex :: Int -> Object -> JSM JSVal
-getPropertyAtIndex index this = undefined
+getPropertyAtIndex index (Object this) = getProperty (primToJSVal $ PrimVal_Number $ fromIntegral index) this
 {-# INLINE getPropertyAtIndex #-}
 
 callAsFunction :: Object -> Object -> [JSVal] -> JSM JSVal
-callAsFunction f this args = undefined
+callAsFunction (Object f) (Object this) args = callAsFunction' f this args
 {-# INLINE callAsFunction #-}
 
 callAsConstructor :: Object -> [JSVal] -> JSM JSVal
-callAsConstructor f args = undefined
+callAsConstructor (Object f) args = callAsConstructor' f args
 {-# INLINE callAsConstructor #-}
 
 newEmptyObject :: JSM Object
-newEmptyObject = fmap (Object . JSVal) $ lazyValResult =<< newJson (A.Object mempty)
+newEmptyObject = Object <$> newJson (A.Object mempty)
 {-# INLINE newEmptyObject #-}
 
-newAsyncCallback :: JSCallAsFunction -> JSM CallbackId
-newAsyncCallback f = undefined
+newAsyncCallback :: JSCallAsFunction -> JSM (CallbackId, JSVal)
+newAsyncCallback = newSyncCallback'
 {-# INLINE newAsyncCallback #-}
 
-newSyncCallback :: JSCallAsFunction -> JSM SyncCallbackId
-newSyncCallback f = undefined
+newSyncCallback :: JSCallAsFunction -> JSM (SyncCallbackId, JSVal)
+newSyncCallback = newSyncCallback'
 {-# INLINE newSyncCallback #-}
 
 newArray :: [JSVal] -> JSM JSVal
-newArray xs = undefined
+newArray xs = do
+  array <- eval "Array"
+  callAsConstructor' array xs
 {-# INLINE newArray #-}
 
 evaluateScript :: JSString -> JSM JSVal
@@ -130,8 +135,12 @@ valueToNumber val = case getPrimJSVal val of
   PrimVal_Bool False -> return 0
   PrimVal_Bool True -> return 1
   PrimVal_Number n -> return n
-  PrimVal_String s -> undefined --TODO: Can we do this conversion safely here?
-  PrimVal_Ref _ -> undefined --TODO: run Number() on it
+  PrimVal_String _ -> do --TODO: Race: by forcing the value first, we're adding some latency in the slow case; perhaps we want to race the two options instead
+    number <- eval "Number"
+    valueToNumber =<< callAsFunction' number number [val]
+  PrimVal_Ref _ -> do --TODO: Race
+    number <- eval "Number"
+    valueToNumber =<< callAsFunction' number number [val]
 {-# INLINE valueToNumber #-}
 
 valueToString :: JSVal -> JSM JSString
@@ -140,17 +149,22 @@ valueToString val = case getPrimJSVal val of
   PrimVal_Null -> return "null"
   PrimVal_Bool False -> return "false"
   PrimVal_Bool True -> return "true"
-  PrimVal_Number n -> undefined --TODO
+  PrimVal_Number n -> do --TODO: Race
+    number <- eval "function(a){return a.toString();}"
+    valueToString =<< callAsFunction' number number [val]
   PrimVal_String s -> return $ JSString s
-  PrimVal_Ref _ -> undefined --TODO: When we have a negative value, we always have a truthy value, beca
+  PrimVal_Ref _ -> do
+    number <- eval "function(a){return a.toString();}"
+    valueToString =<< callAsFunction' number number [val]
 {-# INLINE valueToString #-}
 
 valueToJSON :: JSVal -> JSM JSString
-valueToJSON value = undefined --TODO: Define in terms of valueToJSONValue
+valueToJSON value = do
+  JSString . decodeUtf8 . LBS.toStrict . A.encode <$> getJsonLazy value
 {-# INLINE valueToJSON #-}
 
 valueToJSONValue :: JSVal -> JSM Value
-valueToJSONValue value = undefined
+valueToJSONValue = getJsonLazy
 {-# INLINE valueToJSONValue #-}
 
 isNull :: JSVal -> JSM Bool
@@ -166,13 +180,22 @@ isUndefined val = case getPrimJSVal val of
 {-# INLINE isUndefined #-}
 
 strictEqual :: JSVal -> JSVal -> JSM Bool
-strictEqual a b = undefined
+strictEqual a b = do
+  fun <- eval "function(a,b){return a===b;}"
+  valueToBool =<< callAsFunction (Object fun) (Object jsNull) [a, b]
 {-# INLINE strictEqual #-}
 
 instanceOf :: JSVal -> Object -> JSM Bool
-instanceOf value constructor = undefined
+instanceOf value (Object constructor) = do
+  fun <- eval "function(a,b){return a instanceof b;}"
+  valueToBool =<< callAsFunction (Object fun) (Object jsNull) [value, constructor]
 {-# INLINE instanceOf #-}
 
 propertyNames :: Object -> JSM [JSString]
-propertyNames this = undefined
+propertyNames (Object this) = do
+  fun <- eval "function(a){var r = []; for(n in a) { r.push(n); } return r;}"
+  val <- valueToJSONValue =<< callAsFunction (Object fun) (Object jsNull) [this]
+  return $ case A.fromJSON val of
+    A.Success a -> a
+    A.Error f -> error $ "propertyNames: " ++ f
 {-# INLINE propertyNames #-}

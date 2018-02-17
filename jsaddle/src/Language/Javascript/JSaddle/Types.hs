@@ -116,6 +116,9 @@ import Control.Monad.Trans.Class (MonadTrans(..))
 import Control.Monad.Fix (MonadFix)
 import Control.Concurrent.STM.TVar (TVar)
 import Control.Concurrent.MVar (MVar)
+import Data.Bifunctor
+import Data.Bifoldable
+import Data.Bitraversable
 import Data.Int (Int64)
 import Data.Set (Set)
 import Data.Text (Text)
@@ -354,26 +357,73 @@ aesonOptions typeName = A.defaultOptions
   , A.fieldLabelModifier = drop (length typeName + 2)
   }
 
-data Req
-   = Req_Eval Text RefId -- ^ Evaluate the given JavaScript code and save the result as the given RefId
+data Req input output
+   = Req_Eval Text output -- ^ Evaluate the given JavaScript code and save the result as the given RefId
    | Req_FreeRef RefId
-   | Req_NewJson A.Value RefId
-   | Req_GetJson RefId GetJsonReqId
+   | Req_NewJson A.Value output
+   | Req_GetJson input GetJsonReqId
    | Req_SyncBlock SyncCallbackId -- ^ Ask JS to begin a synchronous block
-   | Req_NewSyncCallback SyncCallbackId RefId -- ^ Create a new sync callback; note that we don't inform the JS side when we dispose of a callback - it's an error to call a disposed callback, so we just detect and throw that error on the Haskell side
-   | Req_NewAsyncCallback SyncCallbackId RefId -- ^ Create a new async callback; note that we don't inform the JS side when we dispose of a callback - it's an error to call a disposed callback, so we just detect and throw that error on the Haskell side
-   deriving (Show, Read, Eq, Generic)
+   | Req_NewSyncCallback SyncCallbackId output -- ^ Create a new sync callback; note that we don't inform the JS side when we dispose of a callback - it's an error to call a disposed callback, so we just detect and throw that error on the Haskell side
+   | Req_NewAsyncCallback SyncCallbackId output -- ^ Create a new async callback; note that we don't inform the JS side when we dispose of a callback - it's an error to call a disposed callback, so we just detect and throw that error on the Haskell side
+   | Req_SetProperty input input input -- ^ @Req_SetProperty a b c@ ==> @c[a] = b;@
+   | Req_GetProperty input input output -- ^ @Req_SetProperty a b c@ ==> @c = b[a];@
+   | Req_CallAsFunction input input [input] output
+   | Req_CallAsConstructor input [input] output
+   deriving (Show, Read, Eq, Generic, Functor, Foldable, Traversable)
 
-instance ToJSON Req where
+instance Bifunctor Req where
+  first f = \case --TODO: Implement with traverse
+    Req_Eval a b -> Req_Eval a b
+    Req_FreeRef a -> Req_FreeRef a
+    Req_NewJson a b -> Req_NewJson a b
+    Req_GetJson a b -> Req_GetJson (f a) b
+    Req_SyncBlock a -> Req_SyncBlock a
+    Req_NewSyncCallback a b -> Req_NewSyncCallback a b
+    Req_NewAsyncCallback a b -> Req_NewAsyncCallback a b
+    Req_SetProperty a b c -> Req_SetProperty (f a) (f b) (f c)
+    Req_GetProperty a b c -> Req_GetProperty (f a) (f b) c
+    Req_CallAsFunction a b c d -> Req_CallAsFunction (f a) (f b) (fmap f c) d
+    Req_CallAsConstructor a b c -> Req_CallAsConstructor (f a) (fmap f b) c
+  second = fmap
+
+instance Bifoldable Req where
+  bifoldr f g z = \case --TODO: Implement with traverse
+    Req_Eval _ b -> g b z
+    Req_FreeRef _ -> z
+    Req_NewJson _ b -> g b z
+    Req_GetJson a _ -> f a z
+    Req_SyncBlock _ -> z
+    Req_NewSyncCallback _ b -> g b z
+    Req_NewAsyncCallback _ b -> g b z
+    Req_SetProperty a b c -> f a $ f b $ f c z
+    Req_GetProperty a b c -> f a $ f b $ g c z
+    Req_CallAsFunction a b c d -> f a $ f b $ foldr f (g d z) c
+    Req_CallAsConstructor a b c -> f a $ foldr f (g c z) b
+
+instance Bitraversable Req where
+  bitraverse f g = \case
+    Req_Eval a b -> Req_Eval <$> pure a <*> g b
+    Req_FreeRef a -> Req_FreeRef <$> pure a
+    Req_NewJson a b -> Req_NewJson <$> pure a <*> g b
+    Req_GetJson a b -> Req_GetJson <$> f a <*> pure b
+    Req_SyncBlock a -> Req_SyncBlock <$> pure a
+    Req_NewSyncCallback a b -> Req_NewSyncCallback <$> pure a <*> g b
+    Req_NewAsyncCallback a b -> Req_NewAsyncCallback <$> pure a <*> g b
+    Req_SetProperty a b c -> Req_SetProperty <$> f a <*> f b <*> f c
+    Req_GetProperty a b c -> Req_GetProperty <$> f a <*> f b <*> g c
+    Req_CallAsFunction a b c d -> Req_CallAsFunction <$> f a <*> f b <*> traverse f c <*> g d
+    Req_CallAsConstructor a b c -> Req_CallAsConstructor <$> f a <*> traverse f b <*> g c
+
+instance (ToJSON input, ToJSON output) => ToJSON (Req input output) where
   toEncoding = A.genericToEncoding $ aesonOptions "Req"
 
-instance FromJSON Req where
+instance (FromJSON input, FromJSON output) => FromJSON (Req input output) where
   parseJSON = A.genericParseJSON $ aesonOptions "Req"
 
 data Rsp
    = Rsp_GetJson GetJsonReqId A.Value
    | Rsp_Result RefId (PrimVal ())
-   | Rsp_CallAsync CallbackId (PrimVal RefId) [PrimVal RefId]
+   | Rsp_CallAsync CallbackId ValId [ValId]
    deriving (Show, Read, Eq, Generic)
 
 instance ToJSON Rsp where
@@ -382,14 +432,13 @@ instance ToJSON Rsp where
 instance FromJSON Rsp where
   parseJSON = A.genericParseJSON $ aesonOptions "Rsp"
 
-
 data JSContextRef = JSContextRef
-  { _jsContextRef_sendReq :: !(Req -> IO ())
+  { _jsContextRef_sendReq :: !(Req ValId RefId -> IO ())
   , _jsContextRef_nextRefId :: !(TVar RefId)
   , _jsContextRef_nextGetJsonReqId :: !(TVar GetJsonReqId)
   , _jsContextRef_getJsonReqs :: !(TVar (Map GetJsonReqId (MVar A.Value))) -- ^ The GetJson requests that are currently in-flight
   , _jsContextRef_nextSyncCallbackId :: !(TVar SyncCallbackId)
-  , _jsContextRef_syncCallbacks :: !(TVar (Map SyncCallbackId (Val -> [Val] -> JSM Val)))
+  , _jsContextRef_syncCallbacks :: !(TVar (Map SyncCallbackId (JSVal -> [JSVal] -> JSM JSVal)))
   , _jsContextRef_pendingResults :: !(TVar (Map RefId (MVar (PrimVal ()))))
   }
 

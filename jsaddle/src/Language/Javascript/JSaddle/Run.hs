@@ -27,9 +27,17 @@ module Language.Javascript.JSaddle.Run (
   , eval
   , lazyValResult
   , freeSyncCallback
+  , newSyncCallback'
   , callbackToSyncFunction
   , callbackToAsyncFunction
   , syncPoint
+  , getProperty
+  , setProperty
+  , getJson
+  , getJsonLazy
+  , callAsFunction'
+  , callAsConstructor'
+  , globalRef
 #endif
 ) where
 
@@ -59,6 +67,7 @@ import System.Random
 import GHC.Base (IO(..), mkWeak#)
 import GHC.Conc (ThreadId(..))
 import qualified Data.Aeson as A
+import Data.Bitraversable
 import Data.Monoid ((<>))
 import Data.Text (Text)
 import qualified Data.Text as T (unpack, pack)
@@ -71,13 +80,14 @@ import Data.Int
 import Data.IORef
        (IORef, mkWeakIORef, newIORef, atomicWriteIORef, readIORef, writeIORef)
 import Control.Monad.Trans.Reader
+import Control.Monad.Trans.Cont
 
 import Language.Javascript.JSaddle.Types
 import Language.Javascript.JSaddle.Exception (JSException(..))
 import Control.DeepSeq (force, deepseq)
 import GHC.Stats (getGCStatsEnabled, getGCStats, GCStats(..))
 import Data.Foldable (forM_)
-import GHCJS.Prim.Internal (JSValueRef)
+import GHCJS.Prim.Internal (JSValueRef, primToJSVal)
 import System.IO.Unsafe
 import Language.Javascript.JSaddle.Monad (syncPoint)
 #endif
@@ -94,31 +104,35 @@ getNextTVar v = atomically $ do
   writeTVar v $! succ a
   return a
 
-sendReq :: Req -> JSM ()
-sendReq r = do
+sendReq :: Req JSVal Ref -> JSM ()
+sendReq req = withReqId req sendReqId
+
+sendReqId :: Req ValId RefId -> JSM ()
+sendReqId r = do
   s <- JSM $ asks _jsContextRef_sendReq
   liftIO $ s r
 
+lazyValToVal :: MonadIO m => LazyVal -> m Val
+lazyValToVal val = do
+  liftIO (readIORef $ _lazyVal_ref val) >>= \case
+    Nothing -> return $ _lazyVal_val val
+    Just ref -> return $ PrimVal_Ref ref
+
+withReqId :: MonadIO m => Req JSVal Ref -> (Req ValId RefId -> m a) -> m a
+withReqId req = runContT $ do
+  bitraverse (ContT . withJSValId) (ContT . withRefId) req
+
 eval :: Text -> JSM JSVal
-eval script = do
-  val <- newRef
-  withRefId val $ \valId -> do
-    sendReq $ Req_Eval script valId
-  JSVal <$> lazyValResult val
+eval script = withJSValOutput_ $ \ref -> do
+  sendReq $ Req_Eval script ref
 
 callbackToSyncFunction :: CallbackId -> JSM JSVal
-callbackToSyncFunction callbackId = do
-  val <- newRef
-  withRefId val $ \valId -> do
-    sendReq $ Req_NewSyncCallback callbackId valId
-  JSVal <$> lazyValResult val
+callbackToSyncFunction callbackId = withJSValOutput_ $ \ref -> do
+  sendReq $ Req_NewSyncCallback callbackId ref
 
 callbackToAsyncFunction :: CallbackId -> JSM JSVal
-callbackToAsyncFunction callbackId = do
-  val <- newRef
-  withRefId val $ \valId -> do
-    sendReq $ Req_NewAsyncCallback callbackId valId
-  JSVal <$> lazyValResult val
+callbackToAsyncFunction callbackId = withJSValOutput_ $ \ref -> do
+  sendReq $ Req_NewAsyncCallback callbackId ref
 
 --TODO: This *MUST* be run before sendReq; we should change the type to enforce this
 lazyValResult :: Ref -> JSM LazyVal
@@ -133,10 +147,9 @@ lazyValResult ref = do
       result <- takeMVar resultVar
       writeIORef refRef Nothing
       return result
-    let !val = ref <$ resultVal
     return $ LazyVal
       { _lazyVal_ref = refRef
-      , _lazyVal_val = val
+      , _lazyVal_val = ref <$ resultVal
       }
 
 newRef :: JSM Ref
@@ -153,6 +166,14 @@ wrapRef valId = do
   void $ liftIO $ mkWeakIORef valRef $ do
     sendReq' $ Req_FreeRef valId
   return $ Ref valRef
+
+newSyncCallback' :: JSCallAsFunction -> JSM (SyncCallbackId, JSVal)
+newSyncCallback' f = do
+  callbackId <- newId _jsContextRef_nextSyncCallbackId
+  f' <- callbackToSyncFunction callbackId --TODO: "ContinueAsync" behavior
+  syncCallbacks <- JSM $ asks _jsContextRef_syncCallbacks
+  liftIO $ atomically $ modifyTVar' syncCallbacks $ M.insertWith (error "newSyncCallback: callbackId already exists") callbackId $ \this args -> primToJSVal PrimVal_Undefined <$ f f' this args
+  return (callbackId, f')
 
 freeSyncCallback :: SyncCallbackId -> JSM ()
 freeSyncCallback cbid = do
@@ -172,6 +193,14 @@ withRefId val f = do
 wrapVal :: ValId -> JSM Val
 wrapVal = traverse wrapRef
 
+wrapJSVal :: ValId -> JSM JSVal
+wrapJSVal valId = primToJSVal <$> wrapVal valId
+
+withJSValId :: MonadIO m => JSVal -> (ValId -> m a) -> m a
+withJSValId (JSVal lv) f = do
+  val <- lazyValToVal lv
+  withValId val f
+
 withValId :: MonadIO m => Val -> (ValId -> m a) -> m a
 withValId val f = case val of
   PrimVal_Undefined -> f PrimVal_Undefined
@@ -181,23 +210,51 @@ withValId val f = case val of
   PrimVal_String s -> f $ PrimVal_String s
   PrimVal_Ref r -> withRefId r $ f . PrimVal_Ref
 
-getJson :: Ref -> JSM A.Value
+getJson :: JSVal -> JSM A.Value
 getJson val = do
-  resultVar <- withRefId val $ \valId -> do
-    getJsonReqId <- newId _jsContextRef_nextGetJsonReqId
-    getJsonReqs <- JSM $ asks _jsContextRef_getJsonReqs
-    resultVar <- liftIO $ newEmptyMVar
-    liftIO $ atomically $ modifyTVar' getJsonReqs $ M.insert getJsonReqId resultVar
-    sendReq $ Req_GetJson valId getJsonReqId
-    return resultVar
-  liftIO $ takeMVar resultVar
+  getResult <- getJson' val
+  liftIO getResult
 
-newJson :: A.Value -> JSM Ref
-newJson v = do
-  val <- newRef
-  withRefId val $ \valId -> do
-    sendReq $ Req_NewJson v valId
-  return val
+getJsonLazy :: JSVal -> JSM A.Value
+getJsonLazy val = do
+  getResult <- getJson' val
+  liftIO $ unsafeInterleaveIO getResult
+
+getJson' :: JSVal -> JSM (IO A.Value)
+getJson' val = do
+  getJsonReqId <- newId _jsContextRef_nextGetJsonReqId
+  getJsonReqs <- JSM $ asks _jsContextRef_getJsonReqs
+  resultVar <- liftIO $ newEmptyMVar
+  liftIO $ atomically $ modifyTVar' getJsonReqs $ M.insert getJsonReqId resultVar
+  sendReq $ Req_GetJson val getJsonReqId
+  return $ takeMVar resultVar
+
+withJSValOutput_ :: (Ref -> JSM ()) -> JSM JSVal
+withJSValOutput_ f = do
+  ref <- newRef
+  result <- JSVal <$> lazyValResult ref
+  f ref
+  return result
+
+newJson :: A.Value -> JSM JSVal
+newJson v = withJSValOutput_ $ \ref -> do
+  sendReq $ Req_NewJson v ref
+
+getProperty :: JSVal -> JSVal -> JSM JSVal
+getProperty prop obj = withJSValOutput_ $ \ref -> do
+  sendReq $ Req_GetProperty prop obj ref
+
+setProperty :: JSVal -> JSVal -> JSVal -> JSM ()
+setProperty prop val obj = do
+  sendReq $ Req_SetProperty prop val obj
+
+callAsFunction' :: JSVal -> JSVal -> [JSVal] -> JSM JSVal
+callAsFunction' f this args = withJSValOutput_ $ \ref -> do
+  sendReq $ Req_CallAsFunction f this args ref
+
+callAsConstructor' :: JSVal -> [JSVal] -> JSM JSVal
+callAsConstructor' f args = withJSValOutput_ $ \ref -> do
+  sendReq $ Req_CallAsConstructor f args ref
 
 -- | Run the given action synchronously in the JS engine, without yielding control
 sync_ :: JSM () -> JSM ()
@@ -207,7 +264,7 @@ sync_ syncBlock = do
   env <- JSM ask
   liftIO $ atomically $ modifyTVar' syncCallbacks $ M.insert syncBlockId $ \_ _ -> do
     syncBlock
-    return PrimVal_Undefined
+    return $ primToJSVal PrimVal_Undefined
 
 sync :: JSM a -> JSM a
 sync syncBlock = do
@@ -215,15 +272,27 @@ sync syncBlock = do
   sync_ $ liftIO . putMVar resultVar =<< syncBlock
   liftIO $ takeMVar resultVar
 
+-- | The RefId of the global object
+globalRefId :: RefId
+globalRefId = RefId 1
+
+globalRef :: Ref
+globalRef = unsafePerformIO $ Ref <$> newIORef globalRefId
+{-# NOINLINE globalRef #-}
+
+-- | The first dynamically-allocated RefId
+initialRefId :: RefId
+initialRefId = RefId 2
+
 runJS
-  :: (Req -> IO ()) -- ^ Send a request to the JS engine; we assume that requests are performed in the order they are sent; requests received while in a synchronous block must not be processed until the synchronous block ends (i.e. until the JS side receives the final value yielded back from the synchronous block)
+  :: (Req ValId RefId -> IO ()) -- ^ Send a request to the JS engine; we assume that requests are performed in the order they are sent; requests received while in a synchronous block must not be processed until the synchronous block ends (i.e. until the JS side receives the final value yielded back from the synchronous block)
   -> IO ( Rsp -> IO () -- Responses must be able to continue coming in as a sync block runs, or else the caller must be careful to ensure that sync blocks are only run after all outstanding responses have been processed
-        , SyncCallbackId -> ValId -> [ValId] -> IO (Either ValId Req) -- The input valIds here must always be allocated on the JS side
-        , IO (Either ValId Req)
+        , SyncCallbackId -> ValId -> [ValId] -> IO (Either ValId (Req ValId RefId)) -- The input valIds here must always be allocated on the JS side
+        , IO (Either ValId (Req ValId RefId))
         , JSContextRef
         )
 runJS sendReqAsync = do
-  nextRefId <- newTVarIO $ RefId 1
+  nextRefId <- newTVarIO initialRefId
   nextGetJsonReqId <- newTVarIO $ GetJsonReqId 1
   getJsonReqs <- newTVarIO M.empty
   nextSyncCallbackId <- newTVarIO $ SyncCallbackId 1
@@ -240,10 +309,10 @@ runJS sendReqAsync = do
         LT -> error "should be impossible: trying to return from deeper sync frame than the current depth"
         -- We're the top frame, so yield our value to the caller
         EQ -> do
-          let yieldAllReady :: Int -> Map Int Val -> Val -> IO (Int, Map Int Val)
+          let yieldAllReady :: Int -> Map Int JSVal -> JSVal -> IO (Int, Map Int JSVal)
               yieldAllReady depth readyFrames retVal = do
                 -- Even though the valId is escaping, this is safe because we know that our yielded value will go out before any potential FreeVal request could go out
-                withValId retVal $ \retValId -> do
+                withJSValId retVal $ \retValId -> do
                   putMVar yieldVar $ Left retValId
 
                 let !nextDepth = pred depth
@@ -276,13 +345,13 @@ runJS sendReqAsync = do
       runSyncCallback syncCallbackId this args = do
         mSyncCallback <- fmap (M.lookup syncCallbackId) $ atomically $ readTVar syncCallbacks
         case mSyncCallback of
-          Just (syncCallback :: Val -> [Val] -> JSM Val) -> do
+          Just (syncCallback :: JSVal -> [JSVal] -> JSM JSVal) -> do
             --TODO: Only use use the yield var for requests that someone might block on; e.g., don't do it for FreeVal; however, FreeVal must still wait until the synchronous block has finished, because otherwise it might free the return value of the synchronous block; however, we also don't want to prevent all cleanup in the event of a long sync block
             myDepth <- enterSyncFrame
             _ <- forkIO $ do
               result <- flip runJSM env $ join $ syncCallback
-                <$> wrapVal this
-                <*> traverse wrapVal args --TODO: Handle exceptions that occur within the syncCallback
+                <$> wrapJSVal this
+                <*> traverse wrapJSVal args --TODO: Handle exceptions that occur within the syncCallback
               exitSyncFrame myDepth result
             yield
           Nothing -> error $ "sync callback " <> show syncCallbackId <> " called, but does not exist"

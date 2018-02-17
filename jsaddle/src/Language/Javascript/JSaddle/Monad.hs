@@ -39,7 +39,8 @@ import Control.Monad.Trans.Reader (runReaderT, ask)
 import Control.Monad.IO.Class (MonadIO(..))
 import Control.Monad.Catch (catch, bracket)
 import Language.Javascript.JSaddle.Types (JSM(..), MonadJSM, liftJSM, askJSM, JSContextRef, runJSM)
-import Control.Concurrent.MVar (MVar)
+import Control.Concurrent.MVar (MVar, newMVar)
+import System.IO.Unsafe (unsafePerformIO)
 
 syncPoint :: Applicative m => m ()
 syncPoint = pure ()
@@ -53,5 +54,10 @@ waitForAnimationFrame = id
 nextAnimationFrame :: m () -> m ()
 nextAnimationFrame = id
 
+--TODO: Get rid of this
+animationFrameHandlerVar :: MVar [Double -> JSM ()]
+animationFrameHandlerVar = unsafePerformIO $ newMVar []
+{-# NOINLINE animationFrameHandlerVar #-}
+
 animationFrameHandlers :: JSContextRef -> MVar [Double -> JSM ()]
-animationFrameHandlers = undefined
+animationFrameHandlers = return animationFrameHandlerVar
