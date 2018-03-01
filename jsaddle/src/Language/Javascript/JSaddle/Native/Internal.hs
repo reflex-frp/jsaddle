@@ -41,9 +41,6 @@ module Language.Javascript.JSaddle.Native.Internal (
   , propertyNames
 ) where
 
-import Control.Monad
-import Control.Monad.IO.Class (MonadIO(..))
-
 import Data.Aeson (Value)
 import qualified Data.Aeson as A
 import Data.Text.Encoding (decodeUtf8)
@@ -52,10 +49,6 @@ import qualified Data.ByteString.Lazy as LBS
 import GHCJS.Prim.Internal
 import Language.Javascript.JSaddle.Types
 import Language.Javascript.JSaddle.Run
-import GHC.IORef (IORef(..), readIORef)
-import GHC.STRef (STRef(..))
-import GHC.IO (IO(..))
-import GHC.Base (touch#)
 
 --TODO: Make JSString a JSVal under the hood
 setPropertyByName :: JSString -> JSVal -> Object -> JSM ()
@@ -106,14 +99,20 @@ newSyncCallback :: JSCallAsFunction -> JSM (SyncCallbackId, JSVal)
 newSyncCallback = newSyncCallback'
 {-# INLINE newSyncCallback #-}
 
+getGlobal :: JSString -> JSM JSVal
+getGlobal (JSString name) = do
+  getProperty (primToJSVal $ PrimVal_String name) $ primToJSVal $ PrimVal_Ref globalRef
+
 newArray :: [JSVal] -> JSM JSVal
 newArray xs = do
-  array <- eval "Array"
+  array <- getGlobal "Array"
   callAsConstructor' array xs
 {-# INLINE newArray #-}
 
 evaluateScript :: JSString -> JSM JSVal
-evaluateScript (JSString str) = eval str
+evaluateScript (JSString str) = do
+  eval <- getGlobal "eval"
+  callAsFunction' eval (primToJSVal $ PrimVal_Ref globalRef) [primToJSVal $ PrimVal_String str]
 {-# INLINE evaluateScript #-}
 
 valueToBool :: JSVal -> JSM Bool
@@ -136,10 +135,10 @@ valueToNumber val = case getPrimJSVal val of
   PrimVal_Bool True -> return 1
   PrimVal_Number n -> return n
   PrimVal_String _ -> do --TODO: Race: by forcing the value first, we're adding some latency in the slow case; perhaps we want to race the two options instead
-    number <- eval "Number"
+    number <- getGlobal "Number"
     valueToNumber =<< callAsFunction' number number [val]
   PrimVal_Ref _ -> do --TODO: Race
-    number <- eval "Number"
+    number <- getGlobal "Number"
     valueToNumber =<< callAsFunction' number number [val]
 {-# INLINE valueToNumber #-}
 
@@ -149,13 +148,13 @@ valueToString val = case getPrimJSVal val of
   PrimVal_Null -> return "null"
   PrimVal_Bool False -> return "false"
   PrimVal_Bool True -> return "true"
-  PrimVal_Number n -> do --TODO: Race
-    number <- eval "function(a){return a.toString();}"
-    valueToString =<< callAsFunction' number number [val]
+  PrimVal_Number _ -> do --TODO: Race
+    toString <- getPropertyByName "toString" $ Object val
+    valueToString =<< callAsFunction' toString val []
   PrimVal_String s -> return $ JSString s
   PrimVal_Ref _ -> do
-    number <- eval "function(a){return a.toString();}"
-    valueToString =<< callAsFunction' number number [val]
+    toString <- getPropertyByName "toString" $ Object val
+    valueToString =<< callAsFunction' toString val []
 {-# INLINE valueToString #-}
 
 valueToJSON :: JSVal -> JSM JSString
@@ -181,19 +180,19 @@ isUndefined val = case getPrimJSVal val of
 
 strictEqual :: JSVal -> JSVal -> JSM Bool
 strictEqual a b = do
-  fun <- eval "function(a,b){return a===b;}"
+  fun <- evaluateScript "function(a,b){return a===b;}"
   valueToBool =<< callAsFunction (Object fun) (Object jsNull) [a, b]
 {-# INLINE strictEqual #-}
 
 instanceOf :: JSVal -> Object -> JSM Bool
 instanceOf value (Object constructor) = do
-  fun <- eval "function(a,b){return a instanceof b;}"
+  fun <- evaluateScript "function(a,b){return a instanceof b;}"
   valueToBool =<< callAsFunction (Object fun) (Object jsNull) [value, constructor]
 {-# INLINE instanceOf #-}
 
 propertyNames :: Object -> JSM [JSString]
 propertyNames (Object this) = do
-  fun <- eval "function(a){var r = []; for(n in a) { r.push(n); } return r;}"
+  fun <- evaluateScript "function(a){var r = []; for(n in a) { r.push(n); } return r;}"
   val <- valueToJSONValue =<< callAsFunction (Object fun) (Object jsNull) [this]
   return $ case A.fromJSON val of
     A.Success a -> a

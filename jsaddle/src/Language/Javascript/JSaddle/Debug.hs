@@ -26,7 +26,6 @@ import Data.IORef (readIORef, atomicModifyIORef', newIORef, IORef)
 import System.IO.Unsafe (unsafePerformIO)
 import Data.Monoid ((<>))
 import Control.Monad.IO.Class (MonadIO(..))
-import Data.Int (Int64)
 import Data.Function (on)
 
 contexts :: IORef [JSContextRef]

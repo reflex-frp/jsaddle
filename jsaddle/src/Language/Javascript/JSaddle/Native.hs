@@ -14,7 +14,4 @@ module Language.Javascript.JSaddle.Native (
     module Language.Javascript.JSaddle.Native.Internal
 ) where
 
-import GHCJS.Marshal.Internal (ToJSVal(..))
-import Language.Javascript.JSaddle.Types
-       (JSM(..))
 import Language.Javascript.JSaddle.Native.Internal

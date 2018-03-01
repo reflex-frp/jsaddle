@@ -33,26 +33,23 @@ module Language.Javascript.JSaddle.Monad (
   , bracket
 ) where
 
-#ifndef ghcjs_HOST_OS
-import Control.Monad.Trans.Reader (runReaderT, ask)
-#endif
 import Control.Monad.IO.Class (MonadIO(..))
 import Control.Monad.Catch (catch, bracket)
 import Language.Javascript.JSaddle.Types (JSM(..), MonadJSM, liftJSM, askJSM, JSContextRef, runJSM)
 import Control.Concurrent.MVar (MVar, newMVar)
 import System.IO.Unsafe (unsafePerformIO)
 
-syncPoint :: Applicative m => m ()
-syncPoint = pure ()
+syncPoint :: MonadIO m => m ()
+syncPoint = liftIO $ return ()
 
 syncAfter :: Applicative m => m ()
-syncAfter = pure ()
+syncAfter = pure () --TODO: What should this do?
 
 waitForAnimationFrame :: m () -> m ()
-waitForAnimationFrame = id
+waitForAnimationFrame = id --TODO: What should this do?
 
 nextAnimationFrame :: m () -> m ()
-nextAnimationFrame = id
+nextAnimationFrame = id --TODO: What should this do?
 
 --TODO: Get rid of this
 animationFrameHandlerVar :: MVar [Double -> JSM ()]

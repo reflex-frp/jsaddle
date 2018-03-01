@@ -64,7 +64,7 @@ module Language.Javascript.JSaddle (
 ) where
 
 import GHCJS.Marshal as JSaddle
-import Language.Javascript.JSaddle.Types as JSaddle hiding (eval)
+import Language.Javascript.JSaddle.Types as JSaddle
 import Language.Javascript.JSaddle.Classes as JSaddle
 import Language.Javascript.JSaddle.Marshal.String as JSaddle ()
 import Language.Javascript.JSaddle.Monad as JSaddle

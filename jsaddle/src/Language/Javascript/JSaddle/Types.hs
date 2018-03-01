@@ -19,7 +19,7 @@
 {-# LANGUAGE DeriveFunctor              #-}
 {-# LANGUAGE DeriveTraversable          #-}
 {-# LANGUAGE LambdaCase                 #-}
-{-# OPTIONS_GHC -Wno-deprecated      #-}
+{-# OPTIONS_GHC -Wno-warnings-deprecations      #-}
 -----------------------------------------------------------------------------
 --
 -- Module      :  Language.Javascript.JSaddle.Types
@@ -73,8 +73,8 @@ module Language.Javascript.JSaddle.Types (
 
   , JSContextRef (..)
   , Req (..)
-  , Val (..)
-  , ValId (..)
+  , Val
+  , ValId
   , Ref (..)
   , RefId (..)
   , LazyVal (..)
@@ -93,7 +93,6 @@ module Language.Javascript.JSaddle.Types (
   , withJSValId
   , wrapJSVal
   , newJson
-  , eval
   , lazyValResult
   , callbackToSyncFunction
   , callbackToAsyncFunction
@@ -104,6 +103,7 @@ module Language.Javascript.JSaddle.Types (
   , callAsFunction'
   , callAsConstructor'
   , withLog
+  , unsafeInlineLiftIO
 #endif
 ) where
 
@@ -117,7 +117,6 @@ import GHCJS.Nullable (Nullable(..))
 import GHCJS.Prim.Internal
 import Data.JSString.Internal.Type (JSString(..))
 import Data.Monoid
-import Control.DeepSeq (NFData(..))
 import Control.Monad (void)
 import Control.Monad.Catch (MonadThrow, MonadCatch(..), MonadMask(..), bracket_)
 import Control.Monad.Trans.Cont (ContT(..))
@@ -140,32 +139,24 @@ import Control.Concurrent.MVar (MVar)
 import Data.Bifunctor
 import Data.Bifoldable
 import Data.Bitraversable
-import Data.Int (Int64)
-import Data.Set (Set)
-import Data.Text (Text)
-import Data.Time.Clock (UTCTime(..))
 import Data.Typeable (Typeable)
 import Data.Coerce (coerce, Coercible)
-import Data.Aeson
-       (defaultOptions, genericToEncoding, ToJSON(..), FromJSON(..), Value)
+import Data.Aeson (ToJSON(..), FromJSON(..))
 import GHC.Generics (Generic)
 import Data.Int
 import qualified Data.Aeson as A
 import Data.Map (Map)
-import Data.IORef (IORef)
-import Data.Scientific
-import Data.Foldable
 import System.IO.Unsafe
 import Data.IORef
 import Control.Monad.Ref (MonadRef, MonadAtomicRef(..))
 import qualified Control.Monad.Ref as MonadRef
 import Control.Concurrent.MVar
-       (tryTakeMVar, MVar, putMVar, takeMVar, newMVar, newEmptyMVar, readMVar, modifyMVar, modifyMVar_, withMVar, swapMVar)
+       (putMVar, takeMVar, newEmptyMVar)
 import qualified Data.Map as M
-import Control.Monad.Trans.Reader (ask, asks, runReaderT)
+import Control.Monad.Trans.Reader (asks, runReaderT)
 import Control.Monad.STM (atomically)
 import Control.Concurrent.STM.TVar
-       (TVar, writeTVar, readTVar, readTVarIO, modifyTVar', newTVarIO)
+       (writeTVar, readTVar, modifyTVar')
 import Control.Monad.Primitive
 #endif
 
@@ -334,16 +325,16 @@ data MutabilityType s = Mutable_ s
                       | Immutable_ s
                       | STMutable s
 
-type Mutable   = Mutable_ ()
-type Immutable = Immutable_ ()
+type Mutable   = 'Mutable_ ()
+type Immutable = 'Immutable_ ()
 
 data IsItMutable = IsImmutable
                  | IsMutable
 
 type family Mutability (a :: MutabilityType s) :: IsItMutable where
-  Mutability Immutable     = IsImmutable
-  Mutability Mutable       = IsMutable
-  Mutability (STMutable s) = IsMutable
+  Mutability Immutable     = 'IsImmutable
+  Mutability Mutable       = 'IsMutable
+  Mutability ('STMutable s) = 'IsMutable
 
 newtype SomeJSArray (m :: MutabilityType s) = SomeJSArray JSVal
   deriving (Typeable)
@@ -355,7 +346,7 @@ type JSArray        = SomeJSArray Immutable
 type MutableJSArray = SomeJSArray Mutable
 
 -- | See 'JavaScript.Array.Internal.STJSArray'
-type STJSArray s    = SomeJSArray (STMutable s)
+type STJSArray s    = SomeJSArray ('STMutable s)
 
 -- | See 'JavaScript.Object.Internal.Object'
 newtype Object = Object JSVal
@@ -387,8 +378,7 @@ aesonOptions typeName = A.defaultOptions
   }
 
 data Req input output
-   = Req_Eval Text output -- ^ Evaluate the given JavaScript code and save the result as the given RefId
-   | Req_FreeRef RefId
+   = Req_FreeRef RefId
    | Req_NewJson A.Value output
    | Req_GetJson input GetJsonReqId
    | Req_SyncBlock SyncCallbackId -- ^ Ask JS to begin a synchronous block
@@ -408,7 +398,6 @@ instance Bifoldable Req where
 
 instance Bitraversable Req where
   bitraverse f g = \case
-    Req_Eval a b -> Req_Eval <$> pure a <*> g b
     Req_FreeRef a -> Req_FreeRef <$> pure a
     Req_NewJson a b -> Req_NewJson <$> pure a <*> g b
     Req_GetJson a b -> Req_GetJson <$> f a <*> pure b
@@ -516,10 +505,6 @@ lazyValToVal val = do
 withReqId :: Req JSVal Ref -> (Req ValId RefId -> JSM a) -> JSM a
 withReqId req = runContT $ do
   bitraverse (ContT . withJSValId) (ContT . withRefId) req
-
-eval :: Text -> JSM JSVal
-eval script = withJSValOutput_ $ \ref -> do
-  sendReq $ Req_Eval script ref
 
 callbackToSyncFunction :: CallbackId -> JSM JSVal
 callbackToSyncFunction callbackId = withJSValOutput_ $ \ref -> do

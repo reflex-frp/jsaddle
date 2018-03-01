@@ -27,8 +27,6 @@ import Language.Javascript.JSaddle.Native.Internal
        (valueToBool)
 import Data.Typeable (Typeable)
 import GHCJS.Prim
-import System.IO.Unsafe (unsafePerformIO)
-import Data.IORef (newIORef)
 
 jsTrue :: JSVal
 jsTrue = primToJSVal $ PrimVal_Bool True

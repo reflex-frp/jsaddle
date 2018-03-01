@@ -129,11 +129,8 @@ import Language.Javascript.JSaddle.Value (valToObject, jsNull)
 import Language.Javascript.JSaddle.Classes (MakeObject(..))
 import Language.Javascript.JSaddle.Marshal.String (ToJSString(..))
 import Language.Javascript.JSaddle.Arguments (MakeArgs(..))
-import Control.Monad.IO.Class (MonadIO(..))
 import Language.Javascript.JSaddle.Properties
 import Control.Lens (IndexPreservingGetter, to)
-import Data.IORef (newIORef, readIORef)
-import System.IO.Unsafe (unsafePerformIO)
 import GHCJS.Prim.Internal (primToJSVal)
 
 -- $setup

@@ -18,7 +18,6 @@ module Language.Javascript.JSaddle.Run.Files (
 ) where
 
 import Data.ByteString.Lazy (ByteString)
-import Data.Monoid ((<>))
 
 indexHtml :: ByteString
 indexHtml =

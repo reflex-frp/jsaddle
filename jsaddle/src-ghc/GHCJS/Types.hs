@@ -23,16 +23,6 @@ import GHCJS.Internal.Types
 
 import GHCJS.Prim
 
-import GHC.Int
-import GHC.Types
-import GHC.Prim
-import GHC.Ptr
-import GHC.IORef
-import GHC.IO.Unsafe (unsafePerformIO)
-
-import Control.DeepSeq
-import Unsafe.Coerce
-
 type Ref# = LazyVal
 
 mkRef :: Ref# -> JSVal

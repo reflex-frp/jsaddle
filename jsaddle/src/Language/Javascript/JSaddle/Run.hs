@@ -24,7 +24,6 @@ module Language.Javascript.JSaddle.Run (
   -- * Functions used to implement JSaddle using JSON messaging
     runJS
   , newJson
-  , eval
   , sync
   , lazyValResult
   , freeSyncCallback
@@ -48,48 +47,23 @@ import Language.Javascript.JSaddle.Types (JSM, syncPoint, syncAfter)
 import qualified JavaScript.Web.AnimationFrame as GHCJS
        (waitForAnimationFrame)
 #else
-import Control.Exception (throwIO, evaluate, bracket, assert)
-import Control.Monad (void, when, zipWithM_, join)
+import Control.Monad (when, join)
 import Control.Monad.IO.Class (MonadIO(..))
-import Control.Monad.Trans.Reader (ask, runReaderT)
 import Control.Monad.STM (atomically)
-import Control.Concurrent (forkIO, myThreadId)
-import Control.Concurrent.STM.TChan
-       (tryReadTChan, TChan, readTChan, writeTChan, newTChanIO)
-import Control.Concurrent.STM.TVar
-       (TVar, writeTVar, readTVar, readTVarIO, modifyTVar', newTVarIO)
+import Control.Concurrent (forkIO)
+import Control.Concurrent.STM.TVar (writeTVar, readTVar, newTVarIO)
 import Control.Concurrent.MVar
-       (tryTakeMVar, MVar, putMVar, takeMVar, newMVar, newEmptyMVar, readMVar, modifyMVar, modifyMVar_, withMVar, swapMVar)
-import Control.Monad.Primitive
+       (putMVar, takeMVar, newMVar, newEmptyMVar, modifyMVar, modifyMVar_)
 
-import System.IO.Unsafe (unsafeInterleaveIO)
-import System.Mem.Weak (addFinalizer)
-import System.Random
-
-import GHC.Base (IO(..), mkWeak#)
-import GHC.Conc (ThreadId(..))
-import qualified Data.Aeson as A
-import Data.Bitraversable
 import Data.Monoid ((<>))
-import Data.Text (Text)
-import qualified Data.Text as T (unpack, pack)
 import Data.Map (Map)
 import Data.Maybe
 import qualified Data.Map as M
-import qualified Data.Set as S (empty, member, insert, delete)
-import Data.Time.Clock (getCurrentTime,diffUTCTime)
-import Data.Int
-import Data.IORef
-       (IORef, mkWeakIORef, newIORef, atomicWriteIORef, readIORef, writeIORef)
-import Control.Monad.Trans.Reader
-import Control.Monad.Trans.Cont
+import Data.IORef (newIORef)
 
 import Language.Javascript.JSaddle.Types
-import Language.Javascript.JSaddle.Exception (JSException(..))
-import Control.DeepSeq (force, deepseq)
-import GHC.Stats (getGCStatsEnabled, getGCStats, GCStats(..))
+--TODO: Handle JS exceptions
 import Data.Foldable (forM_)
-import GHCJS.Prim.Internal (JSValueRef, primToJSVal)
 import System.IO.Unsafe
 import Language.Javascript.JSaddle.Monad (syncPoint)
 #endif
@@ -127,7 +101,7 @@ runJS sendReqAsync = do
   let enterSyncFrame = modifyMVar syncState $ \(oldDepth, readyFrames) -> do
         let !newDepth = succ oldDepth
         return ((newDepth, readyFrames), newDepth)
-      exitSyncFrame myDepth myRetVal = modifyMVar_ syncState $ \(oldDepth, readyFrames) -> case oldDepth `compare` myDepth of
+      exitSyncFrame myDepth myRetVal = modifyMVar_ syncState $ \(oldDepth, oldReadyFrames) -> case oldDepth `compare` myDepth of
         LT -> error "should be impossible: trying to return from deeper sync frame than the current depth"
         -- We're the top frame, so yield our value to the caller
         EQ -> do
@@ -144,10 +118,10 @@ runJS sendReqAsync = do
                     | k == nextDepth
                       -> yieldAllReady nextDepth nextReadyFrames nextRetVal
                   _ -> return (nextDepth, readyFrames)
-          yieldAllReady oldDepth readyFrames myRetVal
+          yieldAllReady oldDepth oldReadyFrames myRetVal
         -- We're not the top frame, so just store our value so it can be yielded later
         GT -> do
-          let !newReadyFrames = M.insertWith (error "should be impossible: trying to return from a sync frame that has already returned") myDepth myRetVal readyFrames
+          let !newReadyFrames = M.insertWith (error "should be impossible: trying to return from a sync frame that has already returned") myDepth myRetVal oldReadyFrames
           return (oldDepth, newReadyFrames)
       yield = takeMVar yieldVar
       processRsp = \case
