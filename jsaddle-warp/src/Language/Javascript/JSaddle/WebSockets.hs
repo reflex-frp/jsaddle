@@ -25,9 +25,9 @@ module Language.Javascript.JSaddle.WebSockets (
 --  , debugWrapper
 ) where
 
-import Control.Monad (when, void, forever, join)
-import Control.Concurrent (killThread, forkIO, threadDelay)
-import Control.Exception (handle, AsyncException, throwIO, fromException, finally)
+import Control.Monad (forever, join)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Exception (handle, AsyncException, throwIO, fromException)
 
 import Data.Monoid ((<>))
 import Data.Aeson (encode, decode)
@@ -36,34 +36,24 @@ import Network.Wai
        (Middleware, lazyRequestBody, Application, Request, Response,
         ResponseReceived)
 import Network.WebSockets
-       (defaultConnectionOptions, ConnectionOptions(..), sendTextData,
+       (ConnectionOptions(..), sendTextData,
         receiveDataMessage, acceptRequest, ServerApp, sendPing)
 import qualified Network.WebSockets as WS (DataMessage(..))
 import Network.Wai.Handler.WebSockets (websocketsOr)
 
-import Language.Javascript.JSaddle.Types (JSM(..), JSContextRef(..))
+import Language.Javascript.JSaddle.Types (JSM(..))
 import qualified Network.Wai as W
        (responseLBS, requestMethod, pathInfo)
 import qualified Data.Text as T (pack)
 import qualified Network.HTTP.Types as H
        (status403, status200)
-import Language.Javascript.JSaddle.Run (syncPoint, runJS)
-import Language.Javascript.JSaddle.Run.Files (indexHtml, runBatch, ghcjsHelpers, initState)
-import Language.Javascript.JSaddle.Debug
-       (removeContext, addContext)
+import Language.Javascript.JSaddle.Run (runJS)
+import Language.Javascript.JSaddle.Run.Files (indexHtml, ghcjsHelpers)
 import Data.Maybe (fromMaybe)
-import qualified Data.Map as M (empty, insert, lookup)
 import Data.IORef
-       (readIORef, newIORef, atomicModifyIORef', writeIORef)
+       (readIORef, newIORef, writeIORef)
 import Data.ByteString.Lazy (ByteString)
-import Control.Concurrent.MVar
-       (tryTakeMVar, MVar, tryPutMVar, modifyMVar_, putMVar, takeMVar,
-        readMVar, newMVar, newEmptyMVar, modifyMVar)
-import Network.Wai.Handler.Warp
-       (defaultSettings, setTimeout, setPort, runSettings)
-import Foreign.Store (newStore, readStore, lookupStore)
-import Language.Javascript.JSaddle (askJSM, Rsp, SyncCallbackId, ValId)
-import Control.Monad.IO.Class (MonadIO(..))
+import Language.Javascript.JSaddle (SyncCallbackId, ValId)
 import Control.Monad.Trans.Reader
 
 jsaddleOr :: ConnectionOptions -> JSM () -> Application -> IO Application
@@ -150,7 +140,9 @@ jsaddleCore = "\
     \  var nextValId = -1;\n\
     \  var unwrapVal = function(valId) {\n\
     \    if(typeof valId === 'object') {\n\
-    \      if(valId.length === 0) {\n\
+    \      if(valId === null) {\n\
+    \        return null;\n\
+    \      } else if(valId.length === 0) {\n\
     \        return undefined;\n\
     \      } else {\n\
     \        return vals.get(valId[0]);\n\
@@ -214,7 +206,8 @@ jsaddleCore = "\
     \      sendRsp({\n\
     \        'tag': 'GetJson',\n\
     \        'contents': [\n\
-    \          unwrapVal(req)\n\
+    \          req.contents[1],\n\
+    \          unwrapVal(req.contents[0])\n\
     \        ]\n\
     \      });\n\
     \      break;\n\

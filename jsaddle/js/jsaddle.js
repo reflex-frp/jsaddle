@@ -4,7 +4,9 @@ function jsaddle(global, sendRsp, startSyncCallback, continueSyncCallback) {
   var nextValId = -1;
   var unwrapVal = function(valId) {
     if(typeof valId === 'object') {
-      if(valId.length === 0) {
+      if(valId === null) {
+        return null;
+      } else if(valId.length === 0) {
         return undefined;
       } else {
         return vals.get(valId[0]);
@@ -68,7 +70,8 @@ function jsaddle(global, sendRsp, startSyncCallback, continueSyncCallback) {
       sendRsp({
         'tag': 'GetJson',
         'contents': [
-          unwrapVal(req)
+          req.contents[1],
+          unwrapVal(req.contents[0])
         ]
       });
       break;
