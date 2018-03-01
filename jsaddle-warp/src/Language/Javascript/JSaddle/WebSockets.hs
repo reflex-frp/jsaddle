@@ -48,7 +48,7 @@ import qualified Data.Text as T (pack)
 import qualified Network.HTTP.Types as H
        (status403, status200)
 import Language.Javascript.JSaddle.Run (runJS)
-import Language.Javascript.JSaddle.Run.Files (indexHtml, ghcjsHelpers)
+import Language.Javascript.JSaddle.Run.Files (indexHtml, jsaddleCoreJs, ghcjsHelpers)
 import Data.Maybe (fromMaybe)
 import Data.IORef
        (readIORef, newIORef, writeIORef)
@@ -132,134 +132,10 @@ jsaddleAppPartialWithJs js req sendResponse = case (W.requestMethod req, W.pathI
     ("GET", ["jsaddle.js"]) -> Just $ sendResponse $ W.responseLBS H.status200 [("Content-Type", "application/javascript")] js
     _ -> Nothing
 
-jsaddleCore :: ByteString
-jsaddleCore = "\
-    \function jsaddle(global, sendRsp, startSyncCallback, continueSyncCallback) {\n\
-    \  var vals = new Map();\n\
-    \  vals.set(1, global);\n\
-    \  var nextValId = -1;\n\
-    \  var unwrapVal = function(valId) {\n\
-    \    if(typeof valId === 'object') {\n\
-    \      if(valId === null) {\n\
-    \        return null;\n\
-    \      } else if(valId.length === 0) {\n\
-    \        return undefined;\n\
-    \      } else {\n\
-    \        return vals.get(valId[0]);\n\
-    \      }\n\
-    \    } else {\n\
-    \      return valId;\n\
-    \    }\n\
-    \  };\n\
-    \  var wrapVal = function(val, def) {\n\
-    \    switch(typeof val) {\n\
-    \    case 'undefined':\n\
-    \      return [];\n\
-    \    case 'boolean':\n\
-    \    case 'number':\n\
-    \    case 'string':\n\
-    \      return val;\n\
-    \    case 'object':\n\
-    \      if(val === null) {\n\
-    \        return null;\n\
-    \      }\n\
-    \      // Fall through\n\
-    \    default:\n\
-    \      if(def) {\n\
-    \        return def;\n\
-    \      }\n\
-    \      var valId = nextValId--;\n\
-    \      vals.set(valId, val);\n\
-    \      return [valId];\n\
-    \    }\n\
-    \  };\n\
-    \  var result = function(ref, val) {\n\
-    \    vals.set(ref, val);\n\
-    \    sendRsp({\n\
-    \      'tag': 'Result',\n\
-    \      'contents': [\n\
-    \        ref,\n\
-    \        wrapVal(val, [])\n\
-    \      ]\n\
-    \    });\n\
-    \  };\n\
-    \  var runSyncCallback = function(callback, that, args) {\n\
-    \    var rsp = startSyncCallback(callback, that, args)\n\
-    \    while(rsp.Right) {\n\
-    \      processReq(rsp.Right);\n\
-    \      rsp = continueSyncCallback();\n\
-    \    }\n\
-    \    return rsp.Left;\n\
-    \  };\n\
-    \  var processReq = function(req) {\n\
-    \    switch(req.tag) {\n\
-    \    case 'Eval':\n\
-    \      result(req.contents[1], eval(req.contents[0]));\n\
-    \      break;\n\
-    \    case 'FreeRef':\n\
-    \      vals.delete(req.contents[0]);\n\
-    \      break;\n\
-    \    case 'NewJson':\n\
-    \      result(req.contents[1], req.contents[0]);\n\
-    \      break;\n\
-    \    case 'GetJson':\n\
-    \      sendRsp({\n\
-    \        'tag': 'GetJson',\n\
-    \        'contents': [\n\
-    \          req.contents[1],\n\
-    \          unwrapVal(req.contents[0])\n\
-    \        ]\n\
-    \      });\n\
-    \      break;\n\
-    \    case 'SyncBlock':\n\
-    \      //TODO: Continuation\n\
-    \      runSyncCallback(req.contents[0], [], []);\n\
-    \      break;\n\
-    \    case 'NewSyncCallback':\n\
-    \      result(req.contents[1], function() {\n\
-    \        return runSyncCallback(req.contents[0], wrapVal(this), Array.prototype.slice.call(arguments).map(wrapVal));\n\
-    \      });\n\
-    \      break;\n\
-    \    case 'NewAsyncCallback':\n\
-    \      var callbackId = req.contents[0];\n\
-    \      result(req.contents[1], function() {\n\
-    \        sendRsp({\n\
-    \          'tag': 'CallAsync',\n\
-    \          'contents': [\n\
-    \            callbackId,\n\
-    \            wrapVal(this),\n\
-    \            Array.prototype.slice.call(arguments).map(wrapVal)\n\
-    \          ]\n\
-    \        });\n\
-    \      });\n\
-    \      break;\n\
-    \    case 'SetProperty':\n\
-    \      unwrapVal(req.contents[2])[unwrapVal(req.contents[0])] = unwrapVal(req.contents[1]);\n\
-    \      break;\n\
-    \    case 'GetProperty':\n\
-    \      result(req.contents[2], unwrapVal(req.contents[1])[unwrapVal(req.contents[0])]);\n\
-    \      break;\n\
-    \    case 'CallAsFunction':\n\
-    \      result(req.contents[3], unwrapVal(req.contents[0]).apply(unwrapVal(req.contents[1]), req.contents[2].map(unwrapVal)));\n\
-    \      break;\n\
-    \    case 'CallAsConstructor':\n\
-    \      result(req.contents[2], new (Function.prototype.bind.apply(unwrapVal(req.contents[0]), req.contents[1].map(unwrapVal))));\n\
-    \      break;\n\
-    \    default:\n\
-    \      throw 'processReq: unknown request tag ' + JSON.stringify(req.tag);\n\
-    \    }\n\
-    \  };\n\
-    \  return {\n\
-    \    processReq: processReq\n\
-    \  };\n\
-    \}\n\
-    \"
-
-
 -- Use this to generate this string for embedding
 -- sed -e 's|\\|\\\\|g' -e 's|^|    \\|' -e 's|$|\\n\\|' -e 's|"|\\"|g' data/jsaddle.js | pbcopy
 jsaddleJs :: Bool -> ByteString
-jsaddleJs refreshOnLoad = jsaddleCore <> "\
+jsaddleJs refreshOnLoad = jsaddleCoreJs <> "\
     \if(typeof global !== \"undefined\") {\n\
     \    global.window = global;\n\
     \    global.WebSocket = require('ws');\n\

@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 -----------------------------------------------------------------------------
 --
--- Module      :  Language.Javascript.JSaddle.WebSockets.Files
+-- Module      :  Language.Javascript.JSaddle.Run.Files
 -- Copyright   :  (c) Hamish Mackenzie
 -- License     :  MIT
 --
@@ -13,9 +13,7 @@
 
 module Language.Javascript.JSaddle.Run.Files (
     indexHtml
-  , jsaddleJs
-  , initState
-  , runBatch
+  , jsaddleCoreJs
   , ghcjsHelpers
 ) where
 
@@ -34,329 +32,130 @@ indexHtml =
     \<script src=\"jsaddle.js\"></script>\n\
     \</html>"
 
-initState :: ByteString
-initState = "\
-    \        var jsaddle_values = new Map();\n\
-    \        jsaddle_values.set(0, undefined);\n\
-    \        jsaddle_nextValId = -1;\n\
-    \"
-
-runBatch :: (ByteString -> ByteString) -> Maybe (ByteString -> ByteString) -> ByteString
-runBatch send sendSync = "\
-    \  var runBatch = function(firstBatch, initialSyncDepth) {\n\
-    \    var processBatch = function(timestamp) {\n\
-    \      var batch = firstBatch;\n\
-    \      var callbacksToFree = [];\n\
-    \      var results = [];\n\
-    \      inCallback++;\n\
-    \      try {\n\
-    \        syncDepth = initialSyncDepth || 0;\n\
-    \        for(;;){\n\
-    \          if(batch[2] === expectedBatch) {\n\
-    \            expectedBatch++;\n\
-    \            var nCommandsLength = batch[0].length;\n\
-    \            for (var nCommand = 0; nCommand != nCommandsLength; nCommand++) {\n\
-    \                var cmd = batch[0][nCommand];\n\
-    \                if (cmd.Left) {\n\
-    \                    var d = cmd.Left;\n\
-    \                    switch (d.tag) {\n\
-    \                            case \"FreeRef\":\n\
-    \                                var refsToFree = jsaddle_free.get(d.contents[0]) || [];\n\
-    \                                refsToFree.push(d.contents[1]);\n\
-    \                                jsaddle_free.set(d.contents[0], refsToFree);\n\
-    \                                break;\n\
-    \                            case \"FreeRefs\":\n\
-    \                                var refsToFree = jsaddle_free.get(d.contents) || [];\n\
-    \                                for(var nRef = 0; nRef != refsToFree.length; nRef++)\n\
-    \                                    jsaddle_values.delete(refsToFree[nRef]);\n\
-    \                                jsaddle_free.delete(d.contents);\n\
-    \                                break;\n\
-    \                            case \"SetPropertyByName\":\n\
-    \                                jsaddle_values.get(d.contents[0])[d.contents[1]]=jsaddle_values.get(d.contents[2]);\n\
-    \                                break;\n\
-    \                            case \"SetPropertyAtIndex\":\n\
-    \                                jsaddle_values.get(d.contents[0])[d.contents[1]]=jsaddle_values.get(d.contents[2]);\n\
-    \                                break;\n\
-    \                            case \"EvaluateScript\":\n\
-    \                                var n = d.contents[1];\n\
-    \                                jsaddle_values.set(n, eval(d.contents[0]));\n\
-    \                                break;\n\
-    \                            case \"StringToValue\":\n\
-    \                                var n = d.contents[1];\n\
-    \                                jsaddle_values.set(n, d.contents[0]);\n\
-    \                                break;\n\
-    \                            case \"GetPropertyByName\":\n\
-    \                                var n = d.contents[2];\n\
-    \                                jsaddle_values.set(n, jsaddle_values.get(d.contents[0])[d.contents[1]]);\n\
-    \                                break;\n\
-    \                            case \"GetPropertyAtIndex\":\n\
-    \                                var n = d.contents[2];\n\
-    \                                jsaddle_values.set(n, jsaddle_values.get(d.contents[0])[d.contents[1]]);\n\
-    \                                break;\n\
-    \                            case \"NumberToValue\":\n\
-    \                                var n = d.contents[1];\n\
-    \                                jsaddle_values.set(n, d.contents[0]);\n\
-    \                                break;\n\
-    \                            case \"NewEmptyObject\":\n\
-    \                                var n = d.contents;\n\
-    \                                jsaddle_values.set(n, {});\n\
-    \                                break;\n\
-    \                            case \"NewAsyncCallback\":\n\
-    \                                (function() {\n\
-    \                                    var nFunction = d.contents;\n\
-    \                                    var func = function() {\n\
-    \                                        var nFunctionInFunc = ++jsaddle_index;\n\
-    \                                        jsaddle_values.set(nFunctionInFunc, func);\n\
-    \                                        var nThis = ++jsaddle_index;\n\
-    \                                        jsaddle_values.set(nThis, this);\n\
-    \                                        var args = [];\n\
-    \                                        for (var i = 0; i != arguments.length; i++) {\n\
-    \                                            var nArg = ++jsaddle_index;\n\
-    \                                            jsaddle_values.set(nArg, arguments[i]);\n\
-    \                                            args[i] = nArg;\n\
-    \                                        }\n\
-    \                                        " <> send "{\"tag\": \"Callback\", \"contents\": [lastResults[0], lastResults[1], nFunction, nFunctionInFunc, nThis, args]}" <> "\n\
-    \                                    };\n\
-    \                                    jsaddle_values.set(nFunction, func);\n\
-    \                                })();\n\
-    \                                break;\n\
-    \                            case \"NewSyncCallback\":\n\
-    \                                (function() {\n\
-    \                                    var nFunction = d.contents;\n\
-    \                                    var func = function() {\n\
-    \                                        var nFunctionInFunc = ++jsaddle_index;\n\
-    \                                        jsaddle_values.set(nFunctionInFunc, func);\n\
-    \                                        var nThis = ++jsaddle_index;\n\
-    \                                        jsaddle_values.set(nThis, this);\n\
-    \                                        var args = [];\n\
-    \                                        for (var i = 0; i != arguments.length; i++) {\n\
-    \                                            var nArg = ++jsaddle_index;\n\
-    \                                            jsaddle_values.set(nArg, arguments[i]);\n\
-    \                                            args[i] = nArg;\n\
-    \                                        }\n" <> (
-    case sendSync of
-      Just s  ->
-        "                                        if(inCallback > 0) {\n\
-        \                                          " <> send "{\"tag\": \"Callback\", \"contents\": [lastResults[0], lastResults[1], nFunction, nFunctionInFunc, nThis, args]}" <> "\n\
-        \                                        } else {\n\
-        \                                          runBatch(" <> s "{\"tag\": \"Callback\", \"contents\": [lastResults[0], lastResults[1], nFunction, nFunctionInFunc, nThis, args]}" <> ", 1);\n\
-        \                                        }\n"
-      Nothing ->
-        "                                        " <> send "{\"tag\": \"Callback\", \"contents\": [lastResults[0], lastResults[1], nFunction, nFunctionInFunc, nThis, args]}" <> "\n"
-    ) <>
-    "                                    };\n\
-    \                                    jsaddle_values.set(nFunction, func);\n\
-    \                                })();\n\
-    \                                break;\n\
-    \                            case \"FreeCallback\":\n\
-    \                                callbacksToFree.push(d.contents);\n\
-    \                                break;\n\
-    \                            case \"CallAsFunction\":\n\
-    \                                var n = d.contents[3];\n\
-    \                                jsaddle_values.set(n,\n\
-    \                                    jsaddle_values.get(d.contents[0]).apply(jsaddle_values.get(d.contents[1]),\n\
-    \                                        d.contents[2].map(function(arg){return jsaddle_values.get(arg);})));\n\
-    \                                break;\n\
-    \                            case \"CallAsConstructor\":\n\
-    \                                var n = d.contents[2];\n\
-    \                                var r;\n\
-    \                                var f = jsaddle_values.get(d.contents[0]);\n\
-    \                                var a = d.contents[1].map(function(arg){return jsaddle_values.get(arg);});\n\
-    \                                switch(a.length) {\n\
-    \                                    case 0 : r = new f(); break;\n\
-    \                                    case 1 : r = new f(a[0]); break;\n\
-    \                                    case 2 : r = new f(a[0],a[1]); break;\n\
-    \                                    case 3 : r = new f(a[0],a[1],a[2]); break;\n\
-    \                                    case 4 : r = new f(a[0],a[1],a[2],a[3]); break;\n\
-    \                                    case 5 : r = new f(a[0],a[1],a[2],a[3],a[4]); break;\n\
-    \                                    case 6 : r = new f(a[0],a[1],a[2],a[3],a[4],a[5]); break;\n\
-    \                                    case 7 : r = new f(a[0],a[1],a[2],a[3],a[4],a[5],a[6]); break;\n\
-    \                                    default:\n\
-    \                                        var ret;\n\
-    \                                        var temp = function() {\n\
-    \                                            ret = f.apply(this, a);\n\
-    \                                        };\n\
-    \                                        temp.prototype = f.prototype;\n\
-    \                                        var i = new temp();\n\
-    \                                        if(ret instanceof Object)\n\
-    \                                            r = ret;\n\
-    \                                        else {\n\
-    \                                            i.constructor = f;\n\
-    \                                            r = i;\n\
-    \                                        }\n\
-    \                                }\n\
-    \                                jsaddle_values.set(n, r);\n\
-    \                                break;\n\
-    \                            case \"NewArray\":\n\
-    \                                var n = d.contents[1];\n\
-    \                                jsaddle_values.set(n, d.contents[0].map(function(v){return jsaddle_values.get(v);}));\n\
-    \                                break;\n\
-    \                            case \"SyncWithAnimationFrame\":\n\
-    \                                var n = d.contents;\n\
-    \                                jsaddle_values.set(n, timestamp);\n\
-    \                                break;\n\
-    \                            case \"StartSyncBlock\":\n\
-    \                                syncDepth++;\n\
-    \                                break;\n\
-    \                            case \"EndSyncBlock\":\n\
-    \                                syncDepth--;\n\
-    \                                break;\n\
-    \                            default:\n\
-    \                                " <> send "{\"tag\": \"ProtocolError\", \"contents\": e.data}" <> "\n\
-    \                                return;\n\
-    \                    }\n\
-    \                } else {\n\
-    \                    var d = cmd.Right;\n\
-    \                    switch (d.tag) {\n\
-    \                            case \"ValueToString\":\n\
-    \                                var val = jsaddle_values.get(d.contents);\n\
-    \                                var s = val === null ? \"null\" : val === undefined ? \"undefined\" : val.toString();\n\
-    \                                results.push({\"tag\": \"ValueToStringResult\", \"contents\": s});\n\
-    \                                break;\n\
-    \                            case \"ValueToBool\":\n\
-    \                                results.push({\"tag\": \"ValueToBoolResult\", \"contents\": jsaddle_values.get(d.contents) ? true : false});\n\
-    \                                break;\n\
-    \                            case \"ValueToNumber\":\n\
-    \                                results.push({\"tag\": \"ValueToNumberResult\", \"contents\": Number(jsaddle_values.get(d.contents))});\n\
-    \                                break;\n\
-    \                            case \"ValueToJSON\":\n\
-    \                                var s = jsaddle_values.get(d.contents) === undefined ? \"\" : JSON.stringify(jsaddle_values.get(d.contents));\n\
-    \                                results.push({\"tag\": \"ValueToJSONResult\", \"contents\": s});\n\
-    \                                break;\n\
-    \                            case \"ValueToJSONValue\":\n\
-    \                                results.push({\"tag\": \"ValueToJSONValueResult\", \"contents\": jsaddle_values.get(d.contents)});\n\
-    \                                break;\n\
-    \                            case \"DeRefVal\":\n\
-    \                                var n = d.contents;\n\
-    \                                var v = jsaddle_values.get(n);\n\
-    \                                var c = (v === null           ) ? [0, \"\"] :\n\
-    \                                        (v === undefined      ) ? [1, \"\"] :\n\
-    \                                        (v === false          ) ? [2, \"\"] :\n\
-    \                                        (v === true           ) ? [3, \"\"] :\n\
-    \                                        (typeof v === \"number\") ? [-1, v.toString()] :\n\
-    \                                        (typeof v === \"string\") ? [-2, v]\n\
-    \                                                                : [-3, \"\"];\n\
-    \                                results.push({\"tag\": \"DeRefValResult\", \"contents\": c});\n\
-    \                                break;\n\
-    \                            case \"IsNull\":\n\
-    \                                results.push({\"tag\": \"IsNullResult\", \"contents\": jsaddle_values.get(d.contents) === null});\n\
-    \                                break;\n\
-    \                            case \"IsUndefined\":\n\
-    \                                results.push({\"tag\": \"IsUndefinedResult\", \"contents\": jsaddle_values.get(d.contents) === undefined});\n\
-    \                                break;\n\
-    \                            case \"InstanceOf\":\n\
-    \                                results.push({\"tag\": \"InstanceOfResult\", \"contents\": jsaddle_values.get(d.contents[0]) instanceof jsaddle_values.get(d.contents[1])});\n\
-    \                                break;\n\
-    \                            case \"StrictEqual\":\n\
-    \                                results.push({\"tag\": \"StrictEqualResult\", \"contents\": jsaddle_values.get(d.contents[0]) === jsaddle_values.get(d.contents[1])});\n\
-    \                                break;\n\
-    \                            case \"PropertyNames\":\n\
-    \                                var result = [];\n\
-    \                                for (name in jsaddle_values.get(d.contents)) { result.push(name); }\n\
-    \                                results.push({\"tag\": \"PropertyNamesResult\", \"contents\": result});\n\
-    \                                break;\n\
-    \                            case \"Sync\":\n\
-    \                                results.push({\"tag\": \"SyncResult\", \"contents\": []});\n\
-    \                                break;\n\
-    \                            default:\n\
-    \                                results.push({\"tag\": \"ProtocolError\", \"contents\": e.data});\n\
-    \                        }\n\
-    \                }\n\
-    \            }\n\
-    \            if(syncDepth <= 0) {\n\
-    \              lastResults = [batch[2], {\"tag\": \"Success\", \"contents\": [callbacksToFree, results]}];\n\
-    \              " <> send "{\"tag\": \"BatchResults\", \"contents\": [lastResults[0], lastResults[1]]}" <> "\n\
-    \              break;\n\
-    \            } else {\n" <> (
-    case sendSync of
-      Just s  ->
-        "              lastResults = [batch[2], {\"tag\": \"Success\", \"contents\": [callbacksToFree, results]}];\n\
-        \              batch = " <> s "{\"tag\": \"BatchResults\", \"contents\": [lastResults[0], lastResults[1]]}" <> ";\n\
-        \              results = [];\n\
-        \              callbacksToFree = [];\n"
-      Nothing ->
-        "              " <> send "{\"tag\": \"BatchResults\", \"contents\": [batch[2], {\"tag\": \"Success\", \"contents\": [callbacksToFree, results]}]}" <> "\n\
-        \              break;\n"
-    ) <>
-    "            }\n\
-    \          } else {\n\
-    \            if(syncDepth <= 0) {\n\
-    \              break;\n\
-    \            } else {\n" <> (
-    case sendSync of
-      Just s  ->
-        "              if(batch[2] === expectedBatch - 1) {\n\
-        \                batch = " <> s "{\"tag\": \"BatchResults\", \"contents\": [lastResults[0], lastResults[1]]}" <> ";\n\
-        \              } else {\n\
-        \                batch = " <> s "{\"tag\": \"Duplicate\", \"contents\": [batch[2], expectedBatch]}" <> ";\n\
-        \              }\n\
-        \              results = [];\n\
-        \              callbacksToFree = [];\n"
-      Nothing ->
-        "              " <> send "{\"tag\": \"Duplicate\", \"contents\": [batch[2], expectedBatch]}" <> "\n\
-        \              break;\n"
-    ) <>
-    "            }\n\
-    \          }\n\
-    \        }\n\
+-- Use this to generate this string for embedding
+-- sed -e 's|\\|\\\\|g' -e 's|^|    \\|' -e 's|$|\\n\\|' -e 's|"|\\"|g' js/jsaddle-core.js | pbcopy
+-- (on linux, use xsel -bi instead of pbcopy)
+jsaddleCoreJs :: ByteString
+jsaddleCoreJs = "\
+    \function jsaddle(global, sendRsp, startSyncCallback, continueSyncCallback) {\n\
+    \  var vals = new Map();\n\
+    \  vals.set(1, global);\n\
+    \  var nextValId = -1;\n\
+    \  var unwrapVal = function(valId) {\n\
+    \    if(typeof valId === 'object') {\n\
+    \      if(valId === null) {\n\
+    \        return null;\n\
+    \      } else if(valId.length === 0) {\n\
+    \        return undefined;\n\
+    \      } else {\n\
+    \        return vals.get(valId[0]);\n\
     \      }\n\
-    \      catch (err) {\n\
-    \        var n = ++jsaddle_index;\n\
-    \        jsaddle_values.set(n, err);\n\
-    \        " <> send "{\"tag\": \"BatchResults\", \"contents\": [batch[2], {\"tag\": \"Failure\", \"contents\": [callbacksToFree, results, n]}]}" <> "\n\
-    \      }\n\
-    \      if(inCallback == 1) {\n\
-    \          while(asyncBatch !== null) {\n\
-    \              var b = asyncBatch;\n\
-    \              asyncBatch = null;\n\
-    \              if(b[2] == expectedBatch) runBatch(b);\n\
-    \          }\n\
-    \      }\n\
-    \      inCallback--;\n\
-    \    };\n\
-    \    if(batch[1] && (initialSyncDepth || 0) === 0) {\n\
-    \        window.requestAnimationFrame(processBatch);\n\
-    \    }\n\
-    \    else {\n\
-    \        processBatch(window.performance ? window.performance.now() : null);\n\
+    \    } else {\n\
+    \      return valId;\n\
     \    }\n\
     \  };\n\
-    \  runBatch(batch);\n\
-    \"
-
--- Use this to generate this string for embedding
--- sed -e 's|\\|\\\\|g' -e 's|^|    \\|' -e 's|$|\\n\\|' -e 's|"|\\"|g' data/jsaddle.js | pbcopy
-jsaddleJs :: ByteString
-jsaddleJs = "\
-    \if(typeof global !== \"undefined\") {\n\
-    \    global.window = global;\n\
-    \    global.WebSocket = require('ws');\n\
+    \  var wrapVal = function(val, def) {\n\
+    \    switch(typeof val) {\n\
+    \    case 'undefined':\n\
+    \      return [];\n\
+    \    case 'boolean':\n\
+    \    case 'number':\n\
+    \    case 'string':\n\
+    \      return val;\n\
+    \    case 'object':\n\
+    \      if(val === null) {\n\
+    \        return null;\n\
+    \      }\n\
+    \      // Fall through\n\
+    \    default:\n\
+    \      if(def) {\n\
+    \        return def;\n\
+    \      }\n\
+    \      var valId = nextValId--;\n\
+    \      vals.set(valId, val);\n\
+    \      return [valId];\n\
+    \    }\n\
+    \  };\n\
+    \  var result = function(ref, val) {\n\
+    \    vals.set(ref, val);\n\
+    \    sendRsp({\n\
+    \      'tag': 'Result',\n\
+    \      'contents': [\n\
+    \        ref,\n\
+    \        wrapVal(val, [])\n\
+    \      ]\n\
+    \    });\n\
+    \  };\n\
+    \  var runSyncCallback = function(callback, that, args) {\n\
+    \    var rsp = startSyncCallback(callback, that, args)\n\
+    \    while(rsp.Right) {\n\
+    \      processReq(rsp.Right);\n\
+    \      rsp = continueSyncCallback();\n\
+    \    }\n\
+    \    return rsp.Left;\n\
+    \  };\n\
+    \  var processReq = function(req) {\n\
+    \    switch(req.tag) {\n\
+    \    case 'Eval':\n\
+    \      result(req.contents[1], eval(req.contents[0]));\n\
+    \      break;\n\
+    \    case 'FreeRef':\n\
+    \      vals.delete(req.contents[0]);\n\
+    \      break;\n\
+    \    case 'NewJson':\n\
+    \      result(req.contents[1], req.contents[0]);\n\
+    \      break;\n\
+    \    case 'GetJson':\n\
+    \      sendRsp({\n\
+    \        'tag': 'GetJson',\n\
+    \        'contents': [\n\
+    \          req.contents[1],\n\
+    \          unwrapVal(req.contents[0])\n\
+    \        ]\n\
+    \      });\n\
+    \      break;\n\
+    \    case 'SyncBlock':\n\
+    \      //TODO: Continuation\n\
+    \      runSyncCallback(req.contents[0], [], []);\n\
+    \      break;\n\
+    \    case 'NewSyncCallback':\n\
+    \      result(req.contents[1], function() {\n\
+    \        return runSyncCallback(req.contents[0], wrapVal(this), Array.prototype.slice.call(arguments).map(wrapVal));\n\
+    \      });\n\
+    \      break;\n\
+    \    case 'NewAsyncCallback':\n\
+    \      var callbackId = req.contents[0];\n\
+    \      result(req.contents[1], function() {\n\
+    \        sendRsp({\n\
+    \          'tag': 'CallAsync',\n\
+    \          'contents': [\n\
+    \            callbackId,\n\
+    \            wrapVal(this),\n\
+    \            Array.prototype.slice.call(arguments).map(wrapVal)\n\
+    \          ]\n\
+    \        });\n\
+    \      });\n\
+    \      break;\n\
+    \    case 'SetProperty':\n\
+    \      unwrapVal(req.contents[2])[unwrapVal(req.contents[0])] = unwrapVal(req.contents[1]);\n\
+    \      break;\n\
+    \    case 'GetProperty':\n\
+    \      result(req.contents[2], unwrapVal(req.contents[1])[unwrapVal(req.contents[0])]);\n\
+    \      break;\n\
+    \    case 'CallAsFunction':\n\
+    \      result(req.contents[3], unwrapVal(req.contents[0]).apply(unwrapVal(req.contents[1]), req.contents[2].map(unwrapVal)));\n\
+    \      break;\n\
+    \    case 'CallAsConstructor':\n\
+    \      result(req.contents[2], new (Function.prototype.bind.apply(unwrapVal(req.contents[0]), req.contents[1].map(unwrapVal))));\n\
+    \      break;\n\
+    \    default:\n\
+    \      throw 'processReq: unknown request tag ' + JSON.stringify(req.tag);\n\
+    \    }\n\
+    \  };\n\
+    \  return {\n\
+    \    processReq: processReq\n\
+    \  };\n\
     \}\n\
-    \\n\
-    \var connect = function() {\n\
-    \    var wsaddress =\n\
-    \            typeof window.location === \"undefined\"\n\
-    \                ? \"ws://localhost:3709/\"\n\
-    \                : window.location.protocol.replace('http', 'ws')+\"//\"+window.location.hostname+(window.location.port?(\":\"+window.location.port):\"\");\n\
-    \\n\
-    \    var ws = new WebSocket(wsaddress);\n\
-    \\n\
-    \    ws.onopen = function(e) {\n\
-    \ " <> initState <> "\
-    \\n\
-    \        ws.onmessage = function(e) {\n\
-    \            var batch = JSON.parse(e.data);\n\
-    \\n\
-    \ " <> runBatch (\a -> "ws.send(JSON.stringify(" <> a <> "));") Nothing <> "\
-    \        };\n\
-    \    };\n\
-    \    ws.onerror = function() {\n\
-    \        setTimeout(connect, 1000);\n\
-    \    };\n\
-    \}\n\
-    \\n\
-    \ " <> ghcjsHelpers <> "\
-    \connect();\n\
     \"
 
 ghcjsHelpers :: ByteString
