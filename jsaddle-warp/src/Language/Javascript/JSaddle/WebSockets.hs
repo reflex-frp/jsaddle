@@ -19,10 +19,9 @@ module Language.Javascript.JSaddle.WebSockets (
     jsaddleOr
   , jsaddleApp
   , jsaddleWithAppOr
+  , jsaddleAppWithJs
   , jsaddleAppPartial
   , jsaddleJs
---  , debug
---  , debugWrapper
 ) where
 
 import Control.Monad (forever, join)
@@ -33,7 +32,7 @@ import Data.Monoid ((<>))
 import Data.Aeson (encode, decode)
 
 import Network.Wai
-       (Middleware, lazyRequestBody, Application, Request, Response,
+       (lazyRequestBody, Application, Request, Response,
         ResponseReceived)
 import Network.WebSockets
        (ConnectionOptions(..), sendTextData,
@@ -58,6 +57,7 @@ import Control.Monad.Trans.Reader
 
 jsaddleOr :: ConnectionOptions -> JSM () -> Application -> IO Application
 jsaddleOr opts entryPoint otherApp = do
+    --TODO: Allow multiple simultaneous connections
     processSyncResultRef <- newIORef $ error "processSyncResult not yet set up"
     let processSyncResult callback this args = do
           f <- readIORef processSyncResultRef
@@ -101,6 +101,7 @@ jsaddleOr opts entryPoint otherApp = do
                 case decode body :: Maybe (Maybe (SyncCallbackId, ValId, [ValId])) of
                     Nothing -> error $ "jsaddle sync message decode failed : " <> show body
                     Just parsed -> do
+                      --TODO: Combine processSyncResult with continueSyncCallback
                       result <- case parsed of
                         Just (callback, this, args) -> processSyncResult callback this args
                         Nothing -> continueSyncCallback
@@ -175,76 +176,3 @@ jsaddleJs refreshOnLoad = jsaddleCoreJs <> "\
     \ " <> ghcjsHelpers <> "\
     \connect();\n\
     \"
-
-{-
--- | Start or restart the server.
--- To run this as part of every :reload use
--- > :def! reload (const $ return "::reload\nLanguage.Javascript.JSaddle.Warp.debug 3708 SomeMainModule.someMainFunction")
-debug :: Int -> JSM () -> IO ()
-debug port f = do
-    debugWrapper $ \withRefresh registerContext ->
-        runSettings (setPort port (setTimeout 3600 defaultSettings)) =<<
-            jsaddleOr defaultConnectionOptions (registerContext >> f >> syncPoint) (withRefresh $ jsaddleAppWithJs $ jsaddleJs True)
-    putStrLn $ "<a href=\"http://localhost:" <> show port <> "\">run</a>"
--}
-
-refreshMiddleware :: ((Response -> IO ResponseReceived) -> IO ResponseReceived) -> Middleware
-refreshMiddleware refresh otherApp req sendResponse = case (W.requestMethod req, W.pathInfo req) of
-    ("POST", ["reload", _syncKey]) -> refresh sendResponse
-    _ -> otherApp req sendResponse
-
-{-
-debugWrapper :: (Middleware -> JSM () -> IO ()) -> IO ()
-debugWrapper run = do
-    reloadMVar <- newEmptyMVar
-    reloadDoneMVars <- newMVar []
-    contexts <- newMVar []
-    let refresh sendResponse = do
-          reloadDone <- newEmptyMVar
-          modifyMVar_ reloadDoneMVars (return . (reloadDone:))
-          readMVar reloadMVar
-          r <- sendResponse $ W.responseLBS H.status200 [("Content-Type", "application/json")] ("reload" :: ByteString)
-          putMVar reloadDone ()
-          return r
-        start :: Int -> IO (IO Int)
-        start expectedConnections = do
-            serverDone <- newEmptyMVar
-            ready <- newEmptyMVar
-            let registerContext :: JSM ()
-                registerContext = do
-                    uuid <- contextId <$> askJSM
-                    browsersConnected <- liftIO $ modifyMVar contexts (\ctxs -> return (uuid:ctxs, length ctxs + 1))
-                    addContext
-                    when (browsersConnected == expectedConnections) . void . liftIO $ tryPutMVar ready ()
-            thread <- forkIO $
-                finally (run (refreshMiddleware refresh) registerContext)
-                    (putMVar serverDone ())
-            _ <- forkIO $ threadDelay 10000000 >> void (tryPutMVar ready ())
-            when (expectedConnections /= 0) $ takeMVar ready
-            return $ do
-                putMVar reloadMVar ()
-                ctxs <- takeMVar contexts
-                mapM_ removeContext ctxs
-                takeMVar reloadDoneMVars >>= mapM_ takeMVar
-                tryTakeMVar serverDone >>= \case
-                    Nothing -> do
-                        killThread thread
-                        takeMVar serverDone
-                    Just _ -> return ()
-                return $ length ctxs
-        restarter :: MVar (Int -> IO (IO Int)) -> IO Int -> IO ()
-        restarter mvar stop = do
-             start' <- takeMVar mvar
-             n <- stop
-             start' n >>= restarter mvar
-    lookupStore shutdown_0 >>= \case
-        Nothing -> do
-            restartMVar <- newMVar start
-            void . forkIO $ restarter restartMVar (return 0)
-            void $ newStore restartMVar
-        Just shutdownStore -> do
-            restartMVar :: MVar (Int -> IO (IO Int)) <- readStore shutdownStore
-            void $ tryTakeMVar restartMVar
-            putMVar restartMVar start
-  where shutdown_0 = 0
--}
