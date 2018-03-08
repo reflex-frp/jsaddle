@@ -1,4 +1,85 @@
 function jsaddle(global, sendRsp, startSyncCallback, continueSyncCallback) {
+  /*
+
+  Queue.js
+
+  A function to represent a queue
+
+  Created by Kate Morley - http://code.iamkate.com/ - and released under the terms
+  of the CC0 1.0 Universal legal code:
+
+  http://creativecommons.org/publicdomain/zero/1.0/legalcode
+
+  */
+
+  /* Creates a new queue. A queue is a first-in-first-out (FIFO) data structure -
+   * items are added to the end of the queue and removed from the front.
+   */
+  function Queue(){
+
+    // initialise the queue and offset
+    var queue  = [];
+    var offset = 0;
+
+    // Returns the length of the queue.
+    this.getLength = function(){
+      return (queue.length - offset);
+    }
+
+    // Returns true if the queue is empty, and false otherwise.
+    this.isEmpty = function(){
+      return (queue.length == 0);
+    }
+
+    /* Enqueues the specified item. The parameter is:
+     *
+     * item - the item to enqueue
+     */
+    this.enqueue = function(item){
+      queue.push(item);
+    }
+
+    /* Enqueues the specified items; faster than calling 'enqueue'
+     * repeatedly. The parameter is:
+     *
+     * items - an array of items to enqueue
+     */
+    this.enqueueArray = function(items){
+      queue.push.apply(queue, items);
+    }
+
+    /* Dequeues an item and returns it. If the queue is empty, the value
+     * 'undefined' is returned.
+     */
+    this.dequeue = function(){
+
+      // if the queue is empty, return immediately
+      if (queue.length == 0) return undefined;
+
+      // store the item at the front of the queue
+      var item = queue[offset];
+
+      // increment the offset and remove the free space if necessary
+      if (++ offset * 2 >= queue.length){
+        queue  = queue.slice(offset);
+        offset = 0;
+      }
+
+      // return the dequeued item
+      return item;
+
+    }
+
+    /* Returns the item at the front of the queue (without dequeuing it). If the
+     * queue is empty then undefined is returned.
+     */
+    this.peek = function(){
+      return (queue.length > 0 ? queue[offset] : undefined);
+    }
+
+  }
+  /* End Queue.js */
+
   var vals = new Map();
   vals.set(1, global);
   var nextValId = -1;
@@ -47,15 +128,44 @@ function jsaddle(global, sendRsp, startSyncCallback, continueSyncCallback) {
       ]
     });
   };
-  var runSyncCallback = function(callback, that, args) {
-    var rsp = startSyncCallback(callback, that, args)
-    while(rsp.Right) {
-      processReq(rsp.Right);
-      rsp = continueSyncCallback();
+  var syncRequests = new Queue();
+  var getNextSyncRequest = function() {
+    if(syncRequests.isEmpty()) {
+      syncRequests.enqueueArray(continueSyncCallback());
     }
-    return rsp.Left;
+    return syncRequests.dequeue();
+  }
+  var processAllEnqueuedReqs = function() {
+    while(!syncRequests.isEmpty()) {
+      var req = syncRequests.dequeue();
+      if(!req.Right) {
+        throw "processAllEnqueuedReqs: req is not Right; this should never happen because Lefts should only be sent while a synchronous request is still in progress";
+      }
+      processSingleReq(req.Right);
+    }
   };
-  var processReq = function(req) {
+  var syncDepth = 0;
+  var runSyncCallback = function(callback, that, args) {
+    syncDepth++;
+    syncRequests.enqueueArray(startSyncCallback(callback, that, args));
+    while(true) {
+      var rsp = getNextSyncRequest();
+      if(rsp.Right) {
+        processSingleReq(rsp.Right);
+      } else {
+        syncDepth--;
+        if(syncDepth === 0 && !syncRequests.isEmpty()) {
+          // Ensure that all remaining sync requests are cleared out in a timely
+          // fashion.  Any incoming websocket requests will also run
+          // processAllEnqueuedReqs, but it could potentially be an unlimited
+          // amount of time before the next websocket request comes in.
+          setTimeout(processAllEnqueuedReqs, 0);
+        }
+        return rsp.Left;
+      }
+    }
+  };
+  var processSingleReq = function(req) {
     switch(req.tag) {
     case 'Eval':
       result(req.contents[1], eval(req.contents[0]));
@@ -110,8 +220,12 @@ function jsaddle(global, sendRsp, startSyncCallback, continueSyncCallback) {
       result(req.contents[2], new (Function.prototype.bind.apply(unwrapVal(req.contents[0]), req.contents[1].map(unwrapVal))));
       break;
     default:
-      throw 'processReq: unknown request tag ' + JSON.stringify(req.tag);
+      throw 'processSingleReq: unknown request tag ' + JSON.stringify(req.tag);
     }
+  };
+  var processReq = function(req) {
+    processAllEnqueuedReqs();
+    processSingleReq(req);
   };
   return {
     processReq: processReq

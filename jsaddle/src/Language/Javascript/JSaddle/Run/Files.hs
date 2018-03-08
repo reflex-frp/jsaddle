@@ -37,6 +37,87 @@ indexHtml =
 jsaddleCoreJs :: ByteString
 jsaddleCoreJs = "\
     \function jsaddle(global, sendRsp, startSyncCallback, continueSyncCallback) {\n\
+    \  /*\n\
+    \\n\
+    \  Queue.js\n\
+    \\n\
+    \  A function to represent a queue\n\
+    \\n\
+    \  Created by Kate Morley - http://code.iamkate.com/ - and released under the terms\n\
+    \  of the CC0 1.0 Universal legal code:\n\
+    \\n\
+    \  http://creativecommons.org/publicdomain/zero/1.0/legalcode\n\
+    \\n\
+    \  */\n\
+    \\n\
+    \  /* Creates a new queue. A queue is a first-in-first-out (FIFO) data structure -\n\
+    \   * items are added to the end of the queue and removed from the front.\n\
+    \   */\n\
+    \  function Queue(){\n\
+    \\n\
+    \    // initialise the queue and offset\n\
+    \    var queue  = [];\n\
+    \    var offset = 0;\n\
+    \\n\
+    \    // Returns the length of the queue.\n\
+    \    this.getLength = function(){\n\
+    \      return (queue.length - offset);\n\
+    \    }\n\
+    \\n\
+    \    // Returns true if the queue is empty, and false otherwise.\n\
+    \    this.isEmpty = function(){\n\
+    \      return (queue.length == 0);\n\
+    \    }\n\
+    \\n\
+    \    /* Enqueues the specified item. The parameter is:\n\
+    \     *\n\
+    \     * item - the item to enqueue\n\
+    \     */\n\
+    \    this.enqueue = function(item){\n\
+    \      queue.push(item);\n\
+    \    }\n\
+    \\n\
+    \    /* Enqueues the specified items; faster than calling 'enqueue'\n\
+    \     * repeatedly. The parameter is:\n\
+    \     *\n\
+    \     * items - an array of items to enqueue\n\
+    \     */\n\
+    \    this.enqueueArray = function(items){\n\
+    \      queue.push.apply(queue, items);\n\
+    \    }\n\
+    \\n\
+    \    /* Dequeues an item and returns it. If the queue is empty, the value\n\
+    \     * 'undefined' is returned.\n\
+    \     */\n\
+    \    this.dequeue = function(){\n\
+    \\n\
+    \      // if the queue is empty, return immediately\n\
+    \      if (queue.length == 0) return undefined;\n\
+    \\n\
+    \      // store the item at the front of the queue\n\
+    \      var item = queue[offset];\n\
+    \\n\
+    \      // increment the offset and remove the free space if necessary\n\
+    \      if (++ offset * 2 >= queue.length){\n\
+    \        queue  = queue.slice(offset);\n\
+    \        offset = 0;\n\
+    \      }\n\
+    \\n\
+    \      // return the dequeued item\n\
+    \      return item;\n\
+    \\n\
+    \    }\n\
+    \\n\
+    \    /* Returns the item at the front of the queue (without dequeuing it). If the\n\
+    \     * queue is empty then undefined is returned.\n\
+    \     */\n\
+    \    this.peek = function(){\n\
+    \      return (queue.length > 0 ? queue[offset] : undefined);\n\
+    \    }\n\
+    \\n\
+    \  }\n\
+    \  /* End Queue.js */\n\
+    \\n\
     \  var vals = new Map();\n\
     \  vals.set(1, global);\n\
     \  var nextValId = -1;\n\
@@ -85,15 +166,44 @@ jsaddleCoreJs = "\
     \      ]\n\
     \    });\n\
     \  };\n\
-    \  var runSyncCallback = function(callback, that, args) {\n\
-    \    var rsp = startSyncCallback(callback, that, args)\n\
-    \    while(rsp.Right) {\n\
-    \      processReq(rsp.Right);\n\
-    \      rsp = continueSyncCallback();\n\
+    \  var syncRequests = new Queue();\n\
+    \  var getNextSyncRequest = function() {\n\
+    \    if(syncRequests.isEmpty()) {\n\
+    \      syncRequests.enqueueArray(continueSyncCallback());\n\
     \    }\n\
-    \    return rsp.Left;\n\
+    \    return syncRequests.dequeue();\n\
+    \  }\n\
+    \  var processAllEnqueuedReqs = function() {\n\
+    \    while(!syncRequests.isEmpty()) {\n\
+    \      var req = syncRequests.dequeue();\n\
+    \      if(!req.Right) {\n\
+    \        throw \"processAllEnqueuedReqs: req is not Right; this should never happen because Lefts should only be sent while a synchronous request is still in progress\";\n\
+    \      }\n\
+    \      processSingleReq(req.Right);\n\
+    \    }\n\
     \  };\n\
-    \  var processReq = function(req) {\n\
+    \  var syncDepth = 0;\n\
+    \  var runSyncCallback = function(callback, that, args) {\n\
+    \    syncDepth++;\n\
+    \    syncRequests.enqueueArray(startSyncCallback(callback, that, args));\n\
+    \    while(true) {\n\
+    \      var rsp = getNextSyncRequest();\n\
+    \      if(rsp.Right) {\n\
+    \        processSingleReq(rsp.Right);\n\
+    \      } else {\n\
+    \        syncDepth--;\n\
+    \        if(syncDepth === 0 && !syncRequests.isEmpty()) {\n\
+    \          // Ensure that all remaining sync requests are cleared out in a timely\n\
+    \          // fashion.  Any incoming websocket requests will also run\n\
+    \          // processAllEnqueuedReqs, but it could potentially be an unlimited\n\
+    \          // amount of time before the next websocket request comes in.\n\
+    \          setTimeout(processAllEnqueuedReqs, 0);\n\
+    \        }\n\
+    \        return rsp.Left;\n\
+    \      }\n\
+    \    }\n\
+    \  };\n\
+    \  var processSingleReq = function(req) {\n\
     \    switch(req.tag) {\n\
     \    case 'Eval':\n\
     \      result(req.contents[1], eval(req.contents[0]));\n\
@@ -148,8 +258,12 @@ jsaddleCoreJs = "\
     \      result(req.contents[2], new (Function.prototype.bind.apply(unwrapVal(req.contents[0]), req.contents[1].map(unwrapVal))));\n\
     \      break;\n\
     \    default:\n\
-    \      throw 'processReq: unknown request tag ' + JSON.stringify(req.tag);\n\
+    \      throw 'processSingleReq: unknown request tag ' + JSON.stringify(req.tag);\n\
     \    }\n\
+    \  };\n\
+    \  var processReq = function(req) {\n\
+    \    processAllEnqueuedReqs();\n\
+    \    processSingleReq(req);\n\
     \  };\n\
     \  return {\n\
     \    processReq: processReq\n\

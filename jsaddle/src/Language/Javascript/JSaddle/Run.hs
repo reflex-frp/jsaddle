@@ -53,7 +53,7 @@ import Control.Monad.STM (atomically)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM.TVar (writeTVar, readTVar, newTVarIO)
 import Control.Concurrent.MVar
-       (putMVar, takeMVar, newMVar, newEmptyMVar, modifyMVar, modifyMVar_)
+       (putMVar, takeMVar, newMVar, newEmptyMVar, modifyMVar, modifyMVar_, swapMVar)
 
 import Data.Monoid ((<>))
 import Data.Map (Map)
@@ -83,8 +83,8 @@ initialRefId = RefId 2
 runJS
   :: (Req ValId RefId -> IO ()) -- ^ Send a request to the JS engine; we assume that requests are performed in the order they are sent; requests received while in a synchronous block must not be processed until the synchronous block ends (i.e. until the JS side receives the final value yielded back from the synchronous block)
   -> IO ( Rsp -> IO () -- Responses must be able to continue coming in as a sync block runs, or else the caller must be careful to ensure that sync blocks are only run after all outstanding responses have been processed
-        , SyncCallbackId -> ValId -> [ValId] -> IO (Either ValId (Req ValId RefId)) -- The input valIds here must always be allocated on the JS side
-        , IO (Either ValId (Req ValId RefId))
+        , SyncCallbackId -> ValId -> [ValId] -> IO [Either ValId (Req ValId RefId)] -- The input valIds here must always be allocated on the JS side
+        , IO [Either ValId (Req ValId RefId)]
         , JSContextRef
         )
 runJS sendReqAsync = do
@@ -94,11 +94,17 @@ runJS sendReqAsync = do
   nextSyncCallbackId <- newTVarIO $ SyncCallbackId 1
   syncCallbacks <- newTVarIO M.empty
   pendingResults <- newTVarIO M.empty
-  yieldVar <- newEmptyMVar
+  yieldAccumVar <- newMVar [] -- Accumulates results that need to be yielded
+  yieldReadyVar <- newEmptyMVar -- Filled when there is at least one item in yieldAccumVar
   -- Each value in the map corresponds to a value ready to be returned from the sync frame corresponding to its key
   -- INVARIANT: \(depth, readyFrames) -> all (< depth) $ M.keys readyFrames
   syncState <- newMVar (0, M.empty)
-  let enterSyncFrame = modifyMVar syncState $ \(oldDepth, readyFrames) -> do
+  let enqueueYieldVal val = modifyMVar_ yieldAccumVar $ \old -> do
+        let new = val : old
+        when (null old) $ do
+          putMVar yieldReadyVar ()
+        return new
+      enterSyncFrame = modifyMVar syncState $ \(oldDepth, readyFrames) -> do
         let !newDepth = succ oldDepth
         return ((newDepth, readyFrames), newDepth)
       exitSyncFrame myDepth myRetVal = modifyMVar_ syncState $ \(oldDepth, oldReadyFrames) -> case oldDepth `compare` myDepth of
@@ -109,7 +115,7 @@ runJS sendReqAsync = do
               yieldAllReady depth readyFrames retVal = do
                 -- Even though the valId is escaping, this is safe because we know that our yielded value will go out before any potential FreeVal request could go out
                 flip runJSM env $ withJSValId retVal $ \retValId -> do
-                  JSM $ liftIO $ putMVar yieldVar $ Left retValId
+                  JSM $ liftIO $ enqueueYieldVal $ Left retValId
 
                 let !nextDepth = pred depth
                 case M.maxViewWithKey readyFrames of
@@ -123,7 +129,9 @@ runJS sendReqAsync = do
         GT -> do
           let !newReadyFrames = M.insertWith (error "should be impossible: trying to return from a sync frame that has already returned") myDepth myRetVal oldReadyFrames
           return (oldDepth, newReadyFrames)
-      yield = takeMVar yieldVar
+      yield = do
+        takeMVar yieldReadyVar
+        reverse <$> swapMVar yieldAccumVar []
       processRsp = \case
         Rsp_GetJson getJsonReqId val -> do
           reqs <- atomically $ do
@@ -149,7 +157,7 @@ runJS sendReqAsync = do
             --TODO: Only use use the yield var for requests that someone might block on; e.g., don't do it for FreeVal; however, FreeVal must still wait until the synchronous block has finished, because otherwise it might free the return value of the synchronous block; however, we also don't want to prevent all cleanup in the event of a long sync block
             myDepth <- enterSyncFrame
             _ <- forkIO $ do
-              result <- flip runJSM (env { _jsContextRef_sendReq = putMVar yieldVar . Right }) $ join $ syncCallback
+              result <- flip runJSM (env { _jsContextRef_sendReq = enqueueYieldVal . Right }) $ join $ syncCallback
                 <$> wrapJSVal this
                 <*> traverse wrapJSVal args --TODO: Handle exceptions that occur within the syncCallback
               exitSyncFrame myDepth result
