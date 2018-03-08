@@ -40,7 +40,8 @@ run :: Int -> IO () -> IO ()
 run _port = id
 #else
 run :: Int -> JSM () -> IO ()
-run port f =
+run port f = do
+    putStrLn $ "jsaddle: running on port " ++ show port
     runSettings (setPort port (setTimeout 3600 defaultSettings)) =<<
         jsaddleOr defaultConnectionOptions (f >> syncPoint) jsaddleApp
 #endif
