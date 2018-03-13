@@ -255,7 +255,7 @@ jsaddleCoreJs = "\
     \      result(req.contents[3], unwrapVal(req.contents[0]).apply(unwrapVal(req.contents[1]), req.contents[2].map(unwrapVal)));\n\
     \      break;\n\
     \    case 'CallAsConstructor':\n\
-    \      result(req.contents[2], new (Function.prototype.bind.apply(unwrapVal(req.contents[0]), req.contents[1].map(unwrapVal))));\n\
+    \      result(req.contents[2], new (Function.prototype.bind.apply(unwrapVal(req.contents[0]), [null].concat(req.contents[1].map(unwrapVal)))));\n\
     \      break;\n\
     \    default:\n\
     \      throw 'processSingleReq: unknown request tag ' + JSON.stringify(req.tag);\n\
