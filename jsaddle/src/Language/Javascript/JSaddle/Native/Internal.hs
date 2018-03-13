@@ -180,19 +180,19 @@ isUndefined val = case getPrimJSVal val of
 
 strictEqual :: JSVal -> JSVal -> JSM Bool
 strictEqual a b = do
-  fun <- evaluateScript "function(a,b){return a===b;}"
+  fun <- evaluateScript "(function(a,b){return a===b;})"
   valueToBool =<< callAsFunction (Object fun) (Object jsNull) [a, b]
 {-# INLINE strictEqual #-}
 
 instanceOf :: JSVal -> Object -> JSM Bool
 instanceOf value (Object constructor) = do
-  fun <- evaluateScript "function(a,b){return a instanceof b;}"
+  fun <- evaluateScript "(function(a,b){return a instanceof b;})"
   valueToBool =<< callAsFunction (Object fun) (Object jsNull) [value, constructor]
 {-# INLINE instanceOf #-}
 
 propertyNames :: Object -> JSM [JSString]
 propertyNames (Object this) = do
-  fun <- evaluateScript "function(a){var r = []; for(n in a) { r.push(n); } return r;}"
+  fun <- evaluateScript "(function(a){var r = []; for(n in a) { r.push(n); } return r;})"
   val <- valueToJSONValue =<< callAsFunction (Object fun) (Object jsNull) [this]
   return $ case A.fromJSON val of
     A.Success a -> a
